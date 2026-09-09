@@ -1,0 +1,50 @@
+id = "g00rek.browsr"
+name = "Browsr"
+version = "0.4.0"
+min_herdr_version = "0.8.2"
+description = "Keep a dedicated Chromium tab group aligned with each Herdr workspace"
+platforms = ["linux"]
+
+[[actions]]
+id = "setup"
+title = "Set up dedicated Chromium"
+description = "Install the native bridge and prepare the dedicated Chromium profile"
+contexts = ["workspace"]
+command = ["./bridge.py", "setup"]
+
+[[actions]]
+id = "launch"
+title = "Show or launch Browsr"
+description = "Show the existing Browsr window or launch its dedicated Chromium profile"
+contexts = ["workspace"]
+command = ["./bridge.py", "launch"]
+
+[[actions]]
+id = "open-link"
+title = "Open localhost in workspace browser group"
+description = "Route the clicked localhost URL to this workspace's Chromium group"
+contexts = ["workspace"]
+command = ["./bridge.py", "open-link"]
+
+[[link_handlers]]
+id = "workspace-localhost"
+title = "Open in this workspace's Chromium group"
+pattern = "(?i)^https?://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?([/?#].*)?$"
+action = "open-link"
+platforms = ["linux"]
+
+[[events]]
+on = "workspace.created"
+command = ["./bridge.py", "hook"]
+
+[[events]]
+on = "workspace.renamed"
+command = ["./bridge.py", "hook"]
+
+[[events]]
+on = "workspace.closed"
+command = ["./bridge.py", "hook"]
+
+[[events]]
+on = "workspace.focused"
+command = ["./bridge.py", "hook"]
