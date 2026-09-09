@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Browsr",
+  "version": "0.4.0",
+  "description": "Maps Herdr workspaces to tab groups in a dedicated Chromium window.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2TnPpHwNqm8STZvMF35WfMS0jKP8StvaGYUYlMcj5U9nfss9h3V7i24Jxj+HmSZFVajXZtTkIeif+A5qBqJwOQuDolcz4DKi3II8x+hUZxGCTPcNmTZmKrzAyeQTFmDbv5EF//Z/9sVJ+bDKlel23t57WSxVbzqGKONbzJq/x7ctfu5G07OLBMFRANqYfYUt/lOtocN3DeWI5gCIm1Y2SJURzyph6SpWhen1TP8XSqW3zuGcehC/eF4P7DsX76VSx1HGl5Y1LcLVxbveiFiC/aSOZO+BBlhVxsjOg6OeGr46rItQ6/Ftrs767SqZeLwJJVAmmQPb+GFXDKsPMWLYqQIDAQAB",
+  "permissions": ["tabs", "tabGroups", "nativeMessaging", "storage"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  }
+}
