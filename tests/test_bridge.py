@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import json
 import os
@@ -11,6 +12,29 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("bridge", os.path.join(os.path.dirname(__file__), "..", "bridge.py"))
 bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bridge)
+
+
+@contextlib.contextmanager
+def sandboxed_state():
+    """Keep a test off the real profile and state directory.
+
+    Every path the bridge writes to is derived from the home directory at
+    import time, so a test that launches has to move all of them. Without this
+    the suite creates files under the user's own Browsr state — and passes on
+    the author's machine while failing on a clean one, which is how a broken
+    test reached the default branch.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "state").mkdir()
+        (root / "profile").mkdir()
+        (root / "extension").mkdir()
+        with patch.object(bridge, "STATE_DIR", root / "state"), \
+                patch.object(bridge, "PROFILE_DIR", root / "profile"), \
+                patch.object(bridge, "LAUNCH_LOCK", root / "state" / "launch.lock"), \
+                patch.object(bridge, "EXTENSION_DIR", root / "extension"), \
+                patch.object(bridge, "EXTENSION_STAMP", root / "state" / "extension.stamp"):
+            yield root
 
 
 class BridgeTests(unittest.TestCase):
@@ -54,7 +78,8 @@ class BridgeTests(unittest.TestCase):
             launched["argv"] = argv
             return None
 
-        with patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
+        with sandboxed_state(), \
+                patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
                 patch.object(bridge, "bridge_alive", side_effect=[False, False, True]), \
                 patch.object(bridge, "browser_alive", return_value=False), \
                 patch.object(bridge.subprocess, "Popen", fake_popen), \
@@ -78,7 +103,8 @@ class BridgeTests(unittest.TestCase):
         """
         launched = []
 
-        with patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
+        with sandboxed_state(), \
+                patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
                 patch.object(bridge, "bridge_alive", return_value=False), \
                 patch.object(bridge, "browser_alive", return_value=True), \
                 patch.object(bridge, "BRIDGE_WAIT_SECONDS", 0.05), \
@@ -170,8 +196,8 @@ class BridgeTests(unittest.TestCase):
 
     def test_only_one_process_at_a_time_may_start_the_browser(self):
         """Several callers wake at once after a reboot; only one may launch."""
-        with tempfile.TemporaryDirectory() as directory:
-            lock = Path(directory) / "launch.lock"
+        with sandboxed_state() as root:
+            lock = root / "state" / "launch.lock"
             probe = (
                 "import fcntl,sys\n"
                 f"handle = open({str(lock)!r}, 'w')\n"
@@ -181,10 +207,9 @@ class BridgeTests(unittest.TestCase):
                 "    sys.exit(3)\n"
                 "sys.exit(0)\n"
             )
-            with patch.object(bridge, "LAUNCH_LOCK", lock):
-                with bridge.launch_lock():
-                    held = subprocess.run([sys.executable, "-c", probe])
-                free = subprocess.run([sys.executable, "-c", probe])
+            with bridge.launch_lock():
+                held = subprocess.run([sys.executable, "-c", probe])
+            free = subprocess.run([sys.executable, "-c", probe])
 
         self.assertEqual(held.returncode, 3, "a second process got in while one was launching")
         self.assertEqual(free.returncode, 0, "the lock was not released")
