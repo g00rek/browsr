@@ -34,12 +34,27 @@ function isLocalUrl(raw) {
 async function loadState() {
 	const stored = (await chrome.storage.local.get(STATE_KEY))[STATE_KEY] || {};
 	managedWindowId = stored.windowId;
-	for (const [workspaceId, groupId] of Object.entries(stored.groups || {})) {
-		groups.set(workspaceId, Number(groupId));
+	// Chromium hands out fresh window, tab and group ids on every start, so
+	// everything read back here is a guess until it is checked. Carrying a dead
+	// id forward is not harmless: it counts as an owned group, and an owned
+	// group is one the merge below refuses to touch, so a whole set of real
+	// duplicates would stay on the strip untouched.
+	const liveGroups = new Set((await chrome.tabGroups.query({})).map(group => group.id));
+	const liveTabs = new Set((await chrome.tabs.query({})).map(tab => tab.id));
+	for (const [key, groupId] of Object.entries(stored.groups || {})) {
+		if (liveGroups.has(Number(groupId))) groups.set(key, Number(groupId));
 	}
-	for (const [workspaceId, tabId] of Object.entries(stored.lastActiveTabs || {})) {
-		lastActiveTabs.set(workspaceId, Number(tabId));
+	for (const [key, tabId] of Object.entries(stored.lastActiveTabs || {})) {
+		if (liveTabs.has(Number(tabId))) lastActiveTabs.set(key, Number(tabId));
 	}
+	if (managedWindowId != null) {
+		try {
+			await chrome.windows.get(managedWindowId);
+		} catch {
+			managedWindowId = undefined;
+		}
+	}
+	await saveState();
 }
 
 async function saveState() {
@@ -53,8 +68,7 @@ async function saveState() {
 }
 
 async function dedupeUnownedGroups() {
-	const win = await getManagedWindow();
-	const allGroups = await chrome.tabGroups.query({ windowId: win.id });
+	const allGroups = await chrome.tabGroups.query({});
 	const ownedIds = new Set(groups.values());
 	const byTitle = new Map();
 	for (const group of allGroups) {
@@ -88,8 +102,14 @@ async function getManagedWindow() {
 			managedWindowId = undefined;
 		}
 	}
-	const normal = (await chrome.windows.getAll({ windowTypes: ['normal'] }))[0];
-	const win = normal || (await chrome.windows.create({ url: 'chrome://newtab/' }));
+	const all = await chrome.windows.getAll({ windowTypes: ['normal'] });
+	// Prefer whichever window already holds the workspace groups. A stray second
+	// launch leaves an empty window behind, and picking that one would put new
+	// tabs somewhere other than the strip the user is actually looking at.
+	const owned = new Set(groups.values());
+	const settled = (await chrome.tabGroups.query({})).find(group => owned.has(group.id));
+	const home = settled && all.find(win => win.id === settled.windowId);
+	const win = home || all[0] || (await chrome.windows.create({ url: 'chrome://newtab/' }));
 	managedWindowId = win.id;
 	await saveState();
 	return win;
@@ -99,24 +119,25 @@ async function validGroup(key) {
 	const groupId = groups.get(key);
 	if (groupId == null) return undefined;
 	try {
-		const group = await chrome.tabGroups.get(groupId);
-		if (group.windowId === (await getManagedWindow()).id) return group;
+		// Deliberately not checking the window. Tying a group's identity to one
+		// window is what multiplied the strip: a duplicate launch adds an empty
+		// window, and every group in the other one turns invisible and is
+		// remade from scratch on the next sync.
+		return await chrome.tabGroups.get(groupId);
 	} catch {}
 	groups.delete(key);
 	return undefined;
 }
 
 async function findUnownedGroupByTitle(title) {
-	const win = await getManagedWindow();
 	const owned = new Set(groups.values());
-	const candidates = await chrome.tabGroups.query({ windowId: win.id, title });
+	const candidates = await chrome.tabGroups.query({ title });
 	return candidates.find(group => !owned.has(group.id));
 }
 
 async function mergeUnownedGroups(canonical, title) {
-	const win = await getManagedWindow();
 	const owned = new Set(groups.values());
-	const candidates = await chrome.tabGroups.query({ windowId: win.id, title });
+	const candidates = await chrome.tabGroups.query({ title });
 	for (const duplicate of candidates) {
 		if (duplicate.id === canonical.id || owned.has(duplicate.id)) continue;
 		const tabs = await chrome.tabs.query({ groupId: duplicate.id });
@@ -151,9 +172,46 @@ async function ensureGroup(sessionId, workspaceId, label) {
 	}
 	groups.set(key, group.id);
 	await mergeUnownedGroups(group, title);
-	await chrome.tabGroups.update(group.id, { title, collapsed: true });
+	// A caller that knows the workspace id but not its label must not rename the
+	// group: the user reads these titles off the strip.
+	const keepTitle = !label && group.title;
+	await chrome.tabGroups.update(group.id, {
+		title: keepTitle ? group.title : title,
+		collapsed: true,
+	});
 	await saveState();
 	return group;
+}
+
+async function closeWorkspaceGroup(key) {
+	const group = await validGroup(key);
+	if (group) {
+		const tabs = await chrome.tabs.query({ groupId: group.id });
+		if (tabs.length) await chrome.tabs.remove(tabs.map(tab => tab.id));
+	}
+	groups.delete(key);
+	lastActiveTabs.delete(key);
+}
+
+async function syncWorkspaceSet(message) {
+	const wanted = new Set();
+	for (const workspace of message.workspaces || []) {
+		wanted.add(workspaceKey(message.session_id, workspace.workspace_id));
+		await ensureGroup(message.session_id, workspace.workspace_id, workspace.label);
+	}
+	// An empty answer is not a claim that Herdr has no workspaces, it is Herdr
+	// failing to answer, and acting on it would wipe the strip.
+	if (wanted.size) {
+		// Herdr is the authority on its own session. A group left behind by a
+		// workspace closed while the bridge was down — the event never arrived
+		// and is never resent — goes now, so the strip cannot drift upwards.
+		const prefix = `${message.session_id || 'default'}\u001f`;
+		for (const key of [...groups.keys()]) {
+			if (!key.startsWith(prefix) || wanted.has(key)) continue;
+			await closeWorkspaceGroup(key);
+		}
+	}
+	await saveState();
 }
 
 async function activateWorkspace(workspaceId, label, sessionId) {
@@ -243,11 +301,12 @@ async function handleMessage(message) {
 			if (message.event === 'focused')
 				await activateWorkspace(message.workspace_id, message.label, message.session_id);
 			if (message.event === 'closed') {
-				const key = workspaceKey(message.session_id, message.workspace_id);
-				groups.delete(key);
-				lastActiveTabs.delete(key);
+				await closeWorkspaceGroup(workspaceKey(message.session_id, message.workspace_id));
 				await saveState();
 			}
+			return;
+		case 'workspace_set':
+			await syncWorkspaceSet(message);
 			return;
 		case 'open_url':
 			await openLocalUrl(message);

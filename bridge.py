@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Herdr plugin entry point: setup, launch, hooks, and localhost routing."""
 
+import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -8,6 +10,8 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +21,14 @@ STATE_DIR = Path.home() / ".local/state/herdr-dev-browser"
 DATA_DIR = Path.home() / ".local/share/herdr-dev-browser"
 PROFILE_DIR = DATA_DIR / "chromium"
 SOCKET_PATH = STATE_DIR / "control.sock"
+LAUNCH_LOCK = STATE_DIR / "launch.lock"
+EXTENSION_DIR = ROOT / "extension"
+EXTENSION_STAMP = STATE_DIR / "extension.stamp"
+DEFAULT_HERDR_SOCKET = Path.home() / ".config/herdr/herdr.sock"
+# How long the extension gets to answer once Chromium is up. It is a service
+# worker, so Chromium may have to start it first.
+BRIDGE_WAIT_SECONDS = 15
+_HERDR_SOCKET_CACHE = None
 HOST_NAME = "dev.herdr.browser"
 EXTENSION_ID = "lnknfooimknfekkpecbjnkjcjhdjmekj"
 # A FIXED DevTools port, and the reason is other people's long-running sessions.
@@ -31,15 +43,22 @@ EXTENSION_ID = "lnknfooimknfekkpecbjnkjcjhdjmekj"
 #
 # Deliberately not 9222: that is the port the user's own daily Chrome answers on
 # for the same protocol, and the two must never be confused for each other.
-# `DevToolsActivePort` in the profile stays the source of truth below, so if this
-# port is ever occupied and Chromium picks another, the endpoint reported is
-# still the real one.
+#
+# This number is also the only source of truth, which the first version of this
+# change got wrong. `DevToolsActivePort` in the profile looks like a safety net
+# but is not one: measured against the installed Chromium 152, that file is
+# written only when the port is left to Chromium (`--remote-debugging-port=0`).
+# Pinning the port stopped it being refreshed, so it kept serving the number
+# from before the change and every client built on it failed to connect.
 DEVTOOLS_PORT = 39222
 
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    # One temp name per writer. Several callers reach setup() within the same
+    # second after a reboot, and with a shared temp name the first one to finish
+    # renames the file out from under the others, which then fail outright.
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
     temporary.replace(path)
 
@@ -66,7 +85,7 @@ def setup():
     atomic_json(STATE_DIR / "config.json", {
         "chromium": chromium,
         "profile": str(PROFILE_DIR),
-        "extension": str(ROOT / "extension"),
+        "extension": str(EXTENSION_DIR),
     })
     return chromium
 
@@ -88,6 +107,72 @@ def socket_request(message, timeout=2):
         return json.loads(raw.split(b"\n", 1)[0])
     finally:
         client.close()
+
+
+def devtools_alive(port):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as answer:
+            return answer.status == 200
+    except (OSError, urllib.error.URLError, ValueError):
+        return False
+
+
+def browser_alive():
+    """Is Chromium itself up? Separate from whether the extension answers."""
+    return devtools_alive(DEVTOOLS_PORT)
+
+
+@contextlib.contextmanager
+def launch_lock():
+    """Serialise the decision to start Chromium across every caller.
+
+    After a reboot the Herdr plugin, the workspace hooks and every agent's MCP
+    server all reach for the browser within the same second. Without this each
+    of them sees a bridge that has not come up yet and starts Chromium, and
+    every start after the first only adds an empty window.
+    """
+    LAUNCH_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    handle = LAUNCH_LOCK.open("w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+
+def herdr_session_id():
+    """Which Herdr server a workspace id belongs to.
+
+    Two Herdr servers can each call a workspace `w14`, so the socket path is
+    part of a workspace's identity. Falling back to a placeholder when the
+    variable is missing is not free: a caller started outside a Herdr pane — an
+    MCP server, a hook run by hand — then lands in a namespace of its own and is
+    handed a second tab group for every workspace the user has.
+    """
+    from_environment = os.environ.get("HERDR_SOCKET_PATH")
+    if from_environment:
+        return from_environment
+    global _HERDR_SOCKET_CACHE
+    if _HERDR_SOCKET_CACHE:
+        return _HERDR_SOCKET_CACHE
+    resolved = str(DEFAULT_HERDR_SOCKET)
+    herdr = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
+    if herdr:
+        try:
+            status = subprocess.run(
+                [herdr, "status", "server"], capture_output=True, text=True,
+                timeout=5, check=True,
+            )
+            for line in status.stdout.splitlines():
+                name, separator, value = line.partition(":")
+                if separator and name.strip() == "socket" and value.strip():
+                    resolved = value.strip()
+                    break
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _HERDR_SOCKET_CACHE = resolved
+    return resolved
 
 
 def bridge_alive():
@@ -137,16 +222,23 @@ def sync_workspaces():
             timeout=8, check=True,
         )
         workspaces = json.loads(output.stdout)["result"]["workspaces"]
-        session_id = os.environ.get("HERDR_SOCKET_PATH", "default")
-        for workspace in workspaces:
-            message = {
-                "type": "workspace",
-                "event": "created",
-                "session_id": session_id,
-                "workspace_id": workspace["workspace_id"],
-                "label": workspace.get("label") or workspace["workspace_id"],
-            }
-            socket_request(message)
+        session_id = herdr_session_id()
+        # The whole set in one message, not a workspace at a time. A workspace
+        # closed while the bridge was down leaves an event that is never resent,
+        # so the strip could only ever grow; sending the full list lets the
+        # extension take away what Herdr no longer has.
+        socket_request({
+            "type": "workspace_set",
+            "request_id": uuid.uuid4().hex,
+            "session_id": session_id,
+            "workspaces": [
+                {
+                    "workspace_id": workspace["workspace_id"],
+                    "label": workspace.get("label") or workspace["workspace_id"],
+                }
+                for workspace in workspaces
+            ],
+        }, timeout=20)
         focused = next((item for item in workspaces if item.get("focused")), None)
         if focused:
             socket_request({
@@ -163,42 +255,105 @@ def sync_workspaces():
 
 
 def launch(wait=True):
-    return ensure_browser(wait=wait, show=True)
+    return ensure_browser(wait=wait, show=True, sync=True)
 
 
-def ensure_browser(wait=True, show=False):
+def extension_fingerprint():
+    parts = []
+    for path in sorted(EXTENSION_DIR.rglob("*")):
+        if path.is_file():
+            stat = path.stat()
+            parts.append(f"{path.relative_to(EXTENSION_DIR)}:{stat.st_size}:{stat.st_mtime_ns}")
+    return "\n".join(parts)
+
+
+def refresh_extension_if_changed():
+    """Make the extension Chromium runs match the extension on disk.
+
+    Chromium keeps a compiled copy of an unpacked extension's service worker in
+    the profile and starts that copy again on the next run. Restarting the
+    browser does not refresh it and neither does raising the version in the
+    manifest, so an edited extension can keep running its old code for days —
+    the repository looks fixed while the browser is not. Dropping the profile's
+    service-worker registration forces Chromium to read the files again.
+    """
+    fingerprint = extension_fingerprint()
+    try:
+        unchanged = EXTENSION_STAMP.read_text() == fingerprint
+    except OSError:
+        unchanged = False
+    if unchanged:
+        return False
+    shutil.rmtree(PROFILE_DIR / "Default" / "Service Worker", ignore_errors=True)
+    EXTENSION_STAMP.parent.mkdir(parents=True, exist_ok=True)
+    EXTENSION_STAMP.write_text(fingerprint)
+    return True
+
+
+def spawn_browser(chromium):
+    refresh_extension_if_changed()
+    # A leftover from an older run can only mislead whoever reads it: with a
+    # fixed port Chromium never writes this file again.
+    (PROFILE_DIR / "DevToolsActivePort").unlink(missing_ok=True)
+    log = (STATE_DIR / "chromium.log").open("wb", buffering=0)
+    subprocess.Popen([
+        chromium,
+        f"--user-data-dir={PROFILE_DIR}",
+        f"--load-extension={EXTENSION_DIR}",
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={DEVTOOLS_PORT}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        "chrome://newtab/",
+        "--enable-logging=stderr",
+    ], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    log.close()
+
+
+def wait_for_bridge():
+    deadline = time.monotonic() + BRIDGE_WAIT_SECONDS
+    while True:
+        if bridge_alive():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def ensure_browser(wait=True, show=False, sync=False):
     chromium = setup()
-    if bridge_alive():
-        if show:
-            show_window()
+    if not bridge_alive():
+        with launch_lock():
+            # Whoever held the lock may have finished the job already.
+            if not bridge_alive():
+                if browser_alive():
+                    # Chromium is up and only the extension is behind. Starting
+                    # Chromium again starts nothing: the command line is handed
+                    # to the copy already running, which answers it by opening
+                    # one more empty window, and an extra window is what leaves
+                    # the extension guessing which one holds the real strip.
+                    if not wait_for_bridge():
+                        raise RuntimeError(
+                            "Browsr działa, ale rozszerzenie nie odpowiada; "
+                            "przeładuj je w chrome://extensions"
+                        )
+                else:
+                    spawn_browser(chromium)
+                    if not wait:
+                        return
+                    if not wait_for_bridge():
+                        raise RuntimeError(
+                            "Chromium ruszył, ale rozszerzenie Herdr nie połączyło się z mostem"
+                        )
+                # The workspace list is re-sent only when the bridge has just
+                # come up. Re-sending it on every call is what turned one bad
+                # lookup into a fresh set of tab groups each time.
+                sync = True
+    if show:
+        show_window()
+    if sync:
         sync_workspaces()
-        return
-    else:
-        log_path = STATE_DIR / "chromium.log"
-        log = log_path.open("wb", buffering=0)
-        subprocess.Popen([
-            chromium,
-            f"--user-data-dir={PROFILE_DIR}",
-            f"--load-extension={ROOT / 'extension'}",
-            "--remote-debugging-address=127.0.0.1",
-            f"--remote-debugging-port={DEVTOOLS_PORT}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--new-window",
-            "chrome://newtab/",
-            "--enable-logging=stderr",
-        ], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        log.close()
-    if wait:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if bridge_alive():
-                if show:
-                    show_window()
-                sync_workspaces()
-                return
-            time.sleep(0.1)
-        raise RuntimeError("Chromium ruszył, ale rozszerzenie Herdr nie połączyło się z mostem")
 
 
 def event_command():
@@ -216,7 +371,7 @@ def event_command():
     return {
         "type": "workspace",
         "event": mapping[event_name],
-        "session_id": os.environ.get("HERDR_SOCKET_PATH", "default"),
+        "session_id": herdr_session_id(),
         "workspace_id": context["workspace_id"],
         "label": context.get("workspace_label") or context["workspace_id"],
     }
@@ -245,7 +400,7 @@ def open_link():
     response = socket_request({
         "type": "open_url",
         "request_id": uuid.uuid4().hex,
-        "session_id": os.environ.get("HERDR_SOCKET_PATH", "default"),
+        "session_id": herdr_session_id(),
         "workspace_id": context["workspace_id"],
         "workspace_label": context.get("workspace_label") or context["workspace_id"],
         "url": url,
@@ -265,9 +420,11 @@ def open_url(raw_url):
     response = socket_request({
         "type": "open_url",
         "request_id": uuid.uuid4().hex,
-        "session_id": os.environ.get("HERDR_SOCKET_PATH", "default"),
+        "session_id": herdr_session_id(),
         "workspace_id": workspace_id,
-        "workspace_label": workspace_id,
+        # No label on purpose. This path runs from an agent's shell, which knows
+        # the workspace id but not what the user called it, and sending the id
+        # as the label renamed the group under them.
         "url": raw_url,
         "focus": False,
     }, timeout=10)
@@ -283,7 +440,7 @@ def workspace_tabs():
     response = socket_request({
         "type": "workspace_tabs",
         "request_id": uuid.uuid4().hex,
-        "session_id": os.environ.get("HERDR_SOCKET_PATH", "default"),
+        "session_id": herdr_session_id(),
         "workspace_id": workspace_id,
     }, timeout=10)
     if not response.get("ok"):
@@ -293,16 +450,12 @@ def workspace_tabs():
 
 def devtools_endpoint():
     ensure_browser(wait=True, show=False)
-    active_port = PROFILE_DIR / "DevToolsActivePort"
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            port = int(active_port.read_text().splitlines()[0])
-            print(f"http://127.0.0.1:{port}")
-            return
-        except (FileNotFoundError, ValueError, IndexError):
-            time.sleep(0.1)
-    raise RuntimeError("Browsr nie udostępnił endpointu DevTools")
+    if not devtools_alive(DEVTOOLS_PORT):
+        raise RuntimeError(
+            f"Browsr nie odpowiada na porcie {DEVTOOLS_PORT}; sprawdź "
+            f"{STATE_DIR / 'chromium.log'}"
+        )
+    print(f"http://127.0.0.1:{DEVTOOLS_PORT}")
 
 
 def main():
