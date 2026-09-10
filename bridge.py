@@ -19,6 +19,22 @@ PROFILE_DIR = DATA_DIR / "chromium"
 SOCKET_PATH = STATE_DIR / "control.sock"
 HOST_NAME = "dev.herdr.browser"
 EXTENSION_ID = "lnknfooimknfekkpecbjnkjcjhdjmekj"
+# A FIXED DevTools port, and the reason is other people's long-running sessions.
+#
+# Chromium was launched with `--remote-debugging-port=0`, so every start picked a
+# new random port. The automation wrapper resolves that port ONCE, when it
+# starts, and hands it to the client as `--browserUrl`; so the moment Browsr is
+# restarted, every agent session already running is pointed at a dead port and
+# its browser tools fail with "Could not connect to Chrome" until the whole
+# client is reconnected — which looks like a broken integration rather than a
+# moved port. A constant survives the restart.
+#
+# Deliberately not 9222: that is the port the user's own daily Chrome answers on
+# for the same protocol, and the two must never be confused for each other.
+# `DevToolsActivePort` in the profile stays the source of truth below, so if this
+# port is ever occupied and Chromium picks another, the endpoint reported is
+# still the real one.
+DEVTOOLS_PORT = 39222
 
 
 def atomic_json(path, value):
@@ -165,7 +181,7 @@ def ensure_browser(wait=True, show=False):
             f"--user-data-dir={PROFILE_DIR}",
             f"--load-extension={ROOT / 'extension'}",
             "--remote-debugging-address=127.0.0.1",
-            "--remote-debugging-port=0",
+            f"--remote-debugging-port={DEVTOOLS_PORT}",
             "--no-first-run",
             "--no-default-browser-check",
             "--new-window",
