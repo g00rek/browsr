@@ -286,6 +286,23 @@ async function workspaceTabs(message) {
 	};
 }
 
+async function browserStatus() {
+	const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+	const tabs = await chrome.tabs.query({});
+	const owned = new Set(groups.values());
+	const all = await chrome.tabGroups.query({});
+	return {
+		windows: windows.length,
+		ungrouped: tabs.filter(tab => tab.groupId === -1).length,
+		groups: all.map(group => ({
+			title: group.title,
+			tabs: tabs.filter(tab => tab.groupId === group.id).length,
+			// A group nobody owns is one no workspace will ever take away.
+			adopted: !owned.has(group.id),
+		})),
+	};
+}
+
 async function handleMessage(message) {
 	switch (message.type) {
 		case 'workspace':
@@ -320,6 +337,8 @@ async function handleMessage(message) {
 		}
 		case 'workspace_tabs':
 			return workspaceTabs(message);
+		case 'status':
+			return browserStatus();
 		default:
 			throw new Error(`Unknown bridge message: ${message.type}`);
 	}

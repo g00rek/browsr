@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -22,6 +23,7 @@ DATA_DIR = Path.home() / ".local/share/herdr-dev-browser"
 PROFILE_DIR = DATA_DIR / "chromium"
 SOCKET_PATH = STATE_DIR / "control.sock"
 LAUNCH_LOCK = STATE_DIR / "launch.lock"
+PANEL_PANES = STATE_DIR / "panel-panes.json"
 EXTENSION_DIR = ROOT / "extension"
 EXTENSION_STAMP = STATE_DIR / "extension.stamp"
 DEFAULT_HERDR_SOCKET = Path.home() / ".config/herdr/herdr.sock"
@@ -66,7 +68,7 @@ def atomic_json(path, value):
 def setup():
     chromium = shutil.which("chromium")
     if not chromium:
-        raise RuntimeError("Nie znaleziono Chromium w PATH")
+        raise RuntimeError("Chromium is not on PATH")
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -103,7 +105,7 @@ def socket_request(message, timeout=2):
                 break
             raw += chunk
         if not raw:
-            raise RuntimeError("Most Chromium nie odpowiedział")
+            raise RuntimeError("The Chromium bridge did not answer")
         return json.loads(raw.split(b"\n", 1)[0])
     finally:
         client.close()
@@ -212,6 +214,179 @@ def show_window():
     return False
 
 
+class HerdrLink:
+    """One connection to Herdr, held open and reused.
+
+    The browser has to ask Herdr which workspace is in front several times a
+    second, because a switch made in the UI reaches a plugin by no other route:
+    it fires no plugin command and emits nothing on the event stream — both
+    measured on Herdr 0.9.1. Spawning the CLI that often would be absurd, so
+    this keeps one socket and reconnects on its own when Herdr restarts.
+    """
+
+    def __init__(self, path=None):
+        self.path = path or herdr_session_id()
+        self.socket = None
+        self.buffer = b""
+        self.counter = 0
+
+    def close(self):
+        if self.socket is not None:
+            try:
+                self.socket.close()
+            except OSError:
+                pass
+        self.socket = None
+        self.buffer = b""
+
+    def _connect(self):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(5)
+        client.connect(self.path)
+        self.socket = client
+        self.buffer = b""
+
+    def _exchange(self, method, params):
+        if self.socket is None:
+            self._connect()
+        self.counter += 1
+        request_id = f"browsr-{self.counter}"
+        payload = {"id": request_id, "method": method, "params": params or {}}
+        self.socket.sendall(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
+        while True:
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                message = json.loads(line)
+                # Anything that is not the answer to this request — a
+                # subscription event, a late reply — is not ours to interpret.
+                if message.get("id") == request_id:
+                    return message.get("result")
+            chunk = self.socket.recv(65536)
+            if not chunk:
+                raise ConnectionError("Herdr closed the connection")
+            self.buffer += chunk
+
+    def request(self, method, params=None):
+        """The result, or None when Herdr cannot be reached at all."""
+        for attempt in (1, 2):
+            try:
+                return self._exchange(method, params)
+            except (OSError, ValueError, ConnectionError, json.JSONDecodeError):
+                self.close()
+                if attempt == 2:
+                    return None
+        return None
+
+    def focused_workspace(self):
+        result = self.request("workspace.list")
+        workspaces = (result or {}).get("workspaces") or []
+        return next((item for item in workspaces if item.get("focused")), None)
+
+
+def herdr_call(*argv):
+    """Run the Herdr CLI and hand back its output."""
+    herdr = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
+    if not herdr:
+        raise RuntimeError("Herdr is not on PATH")
+    return subprocess.run(
+        [herdr, *argv], capture_output=True, text=True, timeout=10, check=True,
+    ).stdout
+
+
+def plugin_context():
+    try:
+        return json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
+    except (KeyError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def current_workspace_id():
+    return os.environ.get("HERDR_WORKSPACE_ID") or plugin_context().get("workspace_id")
+
+
+def current_tab_id():
+    """A pane belongs to a tab, so the panel is tracked per tab, not per workspace."""
+    return os.environ.get("HERDR_TAB_ID") or plugin_context().get("tab_id")
+
+
+def focused_pane_id():
+    """Where the cursor is, so the key can tell "go there" from "close it"."""
+    context = plugin_context()
+    if context.get("focused_pane_id"):
+        return context["focused_pane_id"]
+    try:
+        for pane in json.loads(herdr_call("pane", "list"))["result"]["panes"]:
+            if pane.get("focused"):
+                return pane["pane_id"]
+    except (OSError, KeyError, ValueError, RuntimeError,
+            subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def live_pane_ids():
+    try:
+        return {
+            pane["pane_id"]
+            for pane in json.loads(herdr_call("pane", "list"))["result"]["panes"]
+        }
+    except (OSError, KeyError, ValueError, RuntimeError,
+            subprocess.SubprocessError, json.JSONDecodeError):
+        return set()
+
+
+def read_panel_panes():
+    try:
+        return json.loads(PANEL_PANES.read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def record_panel_pane(tab_id, pane_id):
+    """The panel says where it is, so one key can also reach or close it."""
+    panes = read_panel_panes()
+    panes[tab_id] = pane_id
+    atomic_json(PANEL_PANES, panes)
+
+
+def forget_panel_pane(tab_id):
+    panes = read_panel_panes()
+    if panes.pop(tab_id, None) is not None:
+        atomic_json(PANEL_PANES, panes)
+
+
+def toggle_panel():
+    """One key, three outcomes — the convention the other Herdr sidebars follow.
+
+    Not here          -> open it beside the current pane and go there.
+    Here, cursor away -> go to it. Pressing the key while working elsewhere
+                         means "show me", never "throw it away".
+    Here, cursor in it-> close it.
+
+    Tracked per tab, because that is what a pane belongs to.
+    """
+    tab = current_tab_id()
+    pane_id = read_panel_panes().get(tab) if tab else None
+    # A panel killed without tidying up leaves its id behind; Herdr is the
+    # authority on whether that pane is still there.
+    if pane_id and pane_id in live_pane_ids():
+        if pane_id == focused_pane_id():
+            herdr_call("plugin", "pane", "close", pane_id)
+            forget_panel_pane(tab)
+        else:
+            herdr_call("plugin", "pane", "focus", pane_id)
+        return
+    if tab:
+        forget_panel_pane(tab)
+    herdr_call(
+        "plugin", "pane", "open",
+        "--plugin", "g00rek.browsr", "--entrypoint", "panel",
+        "--placement", "split", "--direction", "right", "--focus",
+    )
+
+
 def herdr_workspaces():
     """Herdr's own workspace list, or None when it will not answer.
 
@@ -287,6 +462,89 @@ def extension_fingerprint():
     return "\n".join(parts)
 
 
+def browser_pids(proc_root=Path("/proc")):
+    """The Browsr browser process, and only it.
+
+    Browsr runs the same binary as the browser the user lives in, so the
+    profile directory is the only thing separating them — and every renderer
+    and utility process carries that too, which is why `--type=` is excluded.
+    """
+    marker = f"--user-data-dir={PROFILE_DIR}"
+    found = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = entry.joinpath("cmdline").read_bytes()
+        except OSError:
+            continue
+        # Chromium rewrites its own argv into a single space-separated blob, so
+        # the NUL separators every other process leaves behind are simply not
+        # there. Flattening first and splitting on whitespace reads both shapes,
+        # and comparing whole fields keeps a longer profile path ending in the
+        # same text from matching.
+        fields = raw.replace(b"\0", b" ").decode(errors="replace").split()
+        if any(field.startswith("--type=") for field in fields):
+            continue
+        if marker in fields:
+            found.append(int(entry.name))
+    return sorted(found)
+
+
+def quit_browser():
+    """Ask Browsr to close. Returns how many processes were asked."""
+    pids = browser_pids()
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    return len(pids)
+
+
+def extension_is_stale():
+    """Do the extension files differ from what the running browser was given?
+
+    Chromium starts its own compiled copy of the service worker, so this is the
+    only way to tell that the browser is running code the repository no longer
+    has. It is the difference that went unnoticed for days.
+    """
+    try:
+        return EXTENSION_STAMP.read_text() != extension_fingerprint()
+    except OSError:
+        return True
+
+
+def browser_status():
+    """Everything the panel puts on screen, gathered without starting anything."""
+    workspaces = herdr_workspaces() or []
+    strip = None
+    if bridge_alive():
+        try:
+            answer = socket_request({
+                "type": "status",
+                "request_id": uuid.uuid4().hex,
+                "session_id": herdr_session_id(),
+            }, timeout=8)
+            strip = answer.get("result") if answer.get("ok") else None
+        except (OSError, RuntimeError, json.JSONDecodeError):
+            strip = None
+    return {
+        "browser": browser_alive(),
+        "bridge": bridge_alive(),
+        "extension_stale": extension_is_stale(),
+        "workspaces": [
+            workspace.get("label") or workspace["workspace_id"]
+            for workspace in workspaces
+        ],
+        "strip": strip,
+    }
+
+
+def print_status():
+    print(json.dumps(browser_status(), ensure_ascii=False))
+
+
 def refresh_extension_if_changed():
     """Make the extension Chromium runs match the extension on disk.
 
@@ -355,8 +613,8 @@ def ensure_browser(wait=True, show=False, sync=False):
                     # the extension guessing which one holds the real strip.
                     if not wait_for_bridge():
                         raise RuntimeError(
-                            "Browsr działa, ale rozszerzenie nie odpowiada; "
-                            "przeładuj je w chrome://extensions"
+                            "Browsr is running but its extension is not "
+                            "answering; reload it in chrome://extensions"
                         )
                 else:
                     spawn_browser(chromium)
@@ -364,7 +622,7 @@ def ensure_browser(wait=True, show=False, sync=False):
                         return
                     if not wait_for_bridge():
                         raise RuntimeError(
-                            "Chromium ruszył, ale rozszerzenie Herdr nie połączyło się z mostem"
+                            "Chromium started but the Herdr extension never reached the bridge"
                         )
                 # The workspace list is re-sent only when the bridge has just
                 # come up. Re-sending it on every call is what turned one bad
@@ -387,7 +645,7 @@ def event_command():
         "workspace_focused": "focused",
     }
     if event_name not in mapping:
-        raise RuntimeError(f"Nieobsługiwane zdarzenie Herdr: {event_name}")
+        raise RuntimeError(f"Unsupported Herdr event: {event_name}")
     return {
         "type": "workspace",
         "event": mapping[event_name],
@@ -430,7 +688,7 @@ def open_link():
     context = json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
     url = context.get("clicked_url", "")
     if not is_local_url(url):
-        raise RuntimeError("Ten handler przyjmuje tylko adresy localhost")
+        raise RuntimeError("This handler only takes localhost addresses")
     ensure_browser(wait=True, show=False)
     response = socket_request({
         "type": "open_url",
@@ -442,15 +700,15 @@ def open_link():
         "focus": True,
     }, timeout=10)
     if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Chromium nie otworzył adresu"))
+        raise RuntimeError(response.get("error", "Chromium did not open the address"))
 
 
 def open_url(raw_url):
     if not is_local_url(raw_url):
-        raise RuntimeError("Browsr automatyzuje tylko adresy localhost")
+        raise RuntimeError("Browsr only automates localhost addresses")
     workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
     if not workspace_id:
-        raise RuntimeError("Brak HERDR_WORKSPACE_ID; uruchom polecenie z pane Herdr")
+        raise RuntimeError("No HERDR_WORKSPACE_ID; run this from a Herdr pane")
     ensure_browser(wait=True, show=False)
     response = socket_request({
         "type": "open_url",
@@ -464,7 +722,7 @@ def open_url(raw_url):
         "focus": False,
     }, timeout=10)
     if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Chromium nie otworzył adresu"))
+        raise RuntimeError(response.get("error", "Chromium did not open the address"))
 
 
 def workspace_tabs():
@@ -479,7 +737,7 @@ def workspace_tabs():
         "workspace_id": workspace_id,
     }, timeout=10)
     if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Nie udało się pobrać kart workspace"))
+        raise RuntimeError(response.get("error", "Could not read the workspace tabs"))
     print(json.dumps(response.get("result") or {"workspace_id": workspace_id, "tabs": []}))
 
 
@@ -487,7 +745,7 @@ def devtools_endpoint():
     ensure_browser(wait=True, show=False)
     if not devtools_alive(DEVTOOLS_PORT):
         raise RuntimeError(
-            f"Browsr nie odpowiada na porcie {DEVTOOLS_PORT}; sprawdź "
+            f"Browsr is not answering on port {DEVTOOLS_PORT}; see "
             f"{STATE_DIR / 'chromium.log'}"
         )
     print(f"http://127.0.0.1:{DEVTOOLS_PORT}")
@@ -498,15 +756,18 @@ def main():
         open_url(sys.argv[2])
         return
     if len(sys.argv) != 2 or sys.argv[1] not in {
-        "setup", "launch", "sync", "hook", "open-link", "workspace-tabs", "mcp-endpoint"
+        "setup", "launch", "sync", "status", "panel", "hook", "open-link",
+        "workspace-tabs", "mcp-endpoint",
     }:
         raise RuntimeError(
-            "Użycie: bridge.py setup|launch|sync|hook|open-link|open-url URL"
-            "|workspace-tabs|mcp-endpoint"
+            "Usage: bridge.py setup|launch|sync|status|panel|hook|open-link"
+            "|open-url URL|workspace-tabs|mcp-endpoint"
         )
     {
         "setup": setup,
         "sync": sync_workspaces,
+        "status": print_status,
+        "panel": toggle_panel,
         "launch": launch,
         "hook": hook,
         "open-link": open_link,
