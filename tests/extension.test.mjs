@@ -158,6 +158,24 @@ test('a sync that lists nothing takes nothing away', async () => {
 	assert.deepEqual(harness.strip().map(group => group.title), ['TasteRay']);
 });
 
+test('the extension can describe the strip it is showing', async () => {
+	// Nothing outside the extension can see tab groups, so a panel that reports
+	// on Browsr has to be able to ask it.
+	const harness = await boot({ windows: [1] });
+	await harness.deliver(workspaceSet(SESSION, ['w16', 'TasteRay'], ['w1R', 'tr']));
+
+	const answer = await harness.deliver({ type: 'status', session_id: SESSION });
+
+	assert.equal(answer.ok, true);
+	assert.equal(answer.result.windows, 1);
+	assert.deepEqual(
+		answer.result.groups.map(group => group.title),
+		['TasteRay', 'tr']
+	);
+	assert.equal(answer.result.groups[0].tabs, 1);
+	assert.equal(typeof answer.result.ungrouped, 'number');
+});
+
 test('group ids left over from a previous browser run are dropped, not carried', async () => {
 	const harness = await boot({
 		windows: [1],
