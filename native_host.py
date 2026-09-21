@@ -158,21 +158,6 @@ def handle_client(connection):
         connection.close()
 
 
-def remove_socket_if_ours(inode):
-    """Tidy up only the socket this process actually created.
-
-    Hosts overlap: the extension reconnects, Chromium starts a new one, and it
-    binds the same path before the old one has noticed its pipe is closed. An
-    unconditional unlink here deletes the live host's socket and takes the whole
-    bridge down with it.
-    """
-    try:
-        if SOCKET_PATH.stat().st_ino == inode:
-            SOCKET_PATH.unlink()
-    except (FileNotFoundError, OSError):
-        pass
-
-
 def socket_server():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if SOCKET_PATH.exists():
@@ -180,7 +165,6 @@ def socket_server():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(SOCKET_PATH))
     os.chmod(SOCKET_PATH, 0o600)
-    inode = SOCKET_PATH.stat().st_ino
     server.listen(16)
     server.settimeout(0.5)
     try:
@@ -191,8 +175,15 @@ def socket_server():
                 continue
             threading.Thread(target=handle_client, args=(connection,), daemon=True).start()
     finally:
+        # Deliberately leaving the socket file behind. Hosts overlap — the
+        # extension reconnects, Chromium starts a new host, and it binds this
+        # same path before the old one has noticed its pipe is closed — so an
+        # exiting host that tidies up deletes the live host's socket and takes
+        # the bridge down with it. Telling the two apart by inode is not
+        # possible either, because the number is reused immediately. A leftover
+        # file costs nothing: the next host unlinks it before binding, and until
+        # then a caller simply fails to connect, which is the truth.
         server.close()
-        remove_socket_if_ours(inode)
 
 
 def main():
