@@ -1,6 +1,6 @@
 id = "g00rek.browsr"
 name = "Browsr"
-version = "0.5.0"
+version = "0.6.0"
 min_herdr_version = "0.8.2"
 description = "Keep a dedicated Chromium tab group aligned with each Herdr workspace"
 platforms = ["linux"]
@@ -18,6 +18,13 @@ title = "Show or launch Browsr"
 description = "Show the existing Browsr window or launch its dedicated Chromium profile"
 contexts = ["workspace"]
 command = ["./bridge.py", "launch"]
+
+[[actions]]
+id = "panel"
+title = "Browsr panel"
+description = "Open the Browsr panel, or close it if it is already open"
+contexts = ["workspace"]
+command = ["./bridge.py", "panel"]
 
 [[actions]]
 id = "open-link"
@@ -48,3 +55,13 @@ command = ["./bridge.py", "hook"]
 [[events]]
 on = "workspace.focused"
 command = ["./bridge.py", "hook"]
+
+# An ordinary pane, not a popup. A popup is session-modal: it takes every
+# keystroke, Escape included, so it has to be dismissed before anything else can
+# be typed. A status panel is something to glance at while working, so it should
+# behave like every other pane and answer to the same keys.
+[[panes]]
+id = "panel"
+title = "Browsr"
+placement = "split"
+command = ["sh", "-c", "exec python3 \"$HERDR_PLUGIN_ROOT/panel.py\""]

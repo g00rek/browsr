@@ -60,6 +60,48 @@ def reconcile_workspaces():
     write_native_message(bridge.workspace_set_message(workspaces))
 
 
+# Five times a second, over a connection that is already open: a switch is
+# followed before the eye notices, and it costs no process and no new socket.
+FOCUS_POLL_SECONDS = 0.2
+
+
+def focus_step(last_workspace_id, link):
+    """Tell the extension which workspace is in front, but only when it changes.
+
+    Herdr does not call a plugin when the workspace is switched in the UI —
+    measured on Herdr 0.9.1: a switch through the API reaches the plugin within
+    the same second, six switches made with the mouse reached it never, though
+    the server recorded every one. So the browser cannot wait to be told. It
+    asks, once a second, and speaks only when the answer is different: at most
+    one message per switch, which is less traffic than being told would be.
+    """
+    focused = link.focused_workspace()
+    if not focused or focused["workspace_id"] == last_workspace_id:
+        return last_workspace_id
+    write_native_message({
+        "type": "workspace",
+        "event": "focused",
+        "session_id": bridge.herdr_session_id(),
+        "workspace_id": focused["workspace_id"],
+        "label": focused.get("label") or focused["workspace_id"],
+    })
+    return focused["workspace_id"]
+
+
+def watch_focus():
+    link = bridge.HerdrLink()
+    last = None
+    try:
+        while not stopping.is_set():
+            try:
+                last = focus_step(last, link)
+            except Exception as error:
+                print(f"Herdr focus watch failed: {error}", file=sys.stderr)
+            stopping.wait(FOCUS_POLL_SECONDS)
+    finally:
+        link.close()
+
+
 def native_reader():
     try:
         while not stopping.is_set():
@@ -116,6 +158,21 @@ def handle_client(connection):
         connection.close()
 
 
+def remove_socket_if_ours(inode):
+    """Tidy up only the socket this process actually created.
+
+    Hosts overlap: the extension reconnects, Chromium starts a new one, and it
+    binds the same path before the old one has noticed its pipe is closed. An
+    unconditional unlink here deletes the live host's socket and takes the whole
+    bridge down with it.
+    """
+    try:
+        if SOCKET_PATH.stat().st_ino == inode:
+            SOCKET_PATH.unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def socket_server():
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if SOCKET_PATH.exists():
@@ -123,6 +180,7 @@ def socket_server():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(SOCKET_PATH))
     os.chmod(SOCKET_PATH, 0o600)
+    inode = SOCKET_PATH.stat().st_ino
     server.listen(16)
     server.settimeout(0.5)
     try:
@@ -134,15 +192,13 @@ def socket_server():
             threading.Thread(target=handle_client, args=(connection,), daemon=True).start()
     finally:
         server.close()
-        try:
-            SOCKET_PATH.unlink()
-        except FileNotFoundError:
-            pass
+        remove_socket_if_ours(inode)
 
 
 def main():
     server_thread = threading.Thread(target=socket_server, daemon=True)
     server_thread.start()
+    threading.Thread(target=watch_focus, daemon=True).start()
     native_reader()
     server_thread.join(timeout=1)
 
