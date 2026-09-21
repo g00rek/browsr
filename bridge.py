@@ -3,6 +3,7 @@
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -279,10 +280,12 @@ class HerdrLink:
                     return None
         return None
 
-    def focused_workspace(self):
+    def workspaces(self):
         result = self.request("workspace.list")
-        workspaces = (result or {}).get("workspaces") or []
-        return next((item for item in workspaces if item.get("focused")), None)
+        return (result or {}).get("workspaces") or []
+
+    def focused_workspace(self):
+        return next((item for item in self.workspaces() if item.get("focused")), None)
 
 
 def herdr_call(*argv):
@@ -454,12 +457,17 @@ def launch(wait=True):
 
 
 def extension_fingerprint():
-    parts = []
+    # Hashed contents rather than size and modification time: a branch switch
+    # rewrites every timestamp without changing a byte, and the panel then
+    # announced stale code and asked for a restart that was not needed.
+    digest = hashlib.sha256()
     for path in sorted(EXTENSION_DIR.rglob("*")):
         if path.is_file():
-            stat = path.stat()
-            parts.append(f"{path.relative_to(EXTENSION_DIR)}:{stat.st_size}:{stat.st_mtime_ns}")
-    return "\n".join(parts)
+            digest.update(str(path.relative_to(EXTENSION_DIR)).encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def browser_pids(proc_root=Path("/proc")):

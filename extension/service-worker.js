@@ -164,6 +164,7 @@ async function ensureGroup(sessionId, workspaceId, label) {
 	}
 	let group = await validGroup(key);
 	if (!group) group = await findUnownedGroupByTitle(title);
+	const isNew = !group;
 	if (!group) {
 		const win = await getManagedWindow();
 		const tab = await chrome.tabs.create({ windowId: win.id, active: false });
@@ -175,10 +176,12 @@ async function ensureGroup(sessionId, workspaceId, label) {
 	// A caller that knows the workspace id but not its label must not rename the
 	// group: the user reads these titles off the strip.
 	const keepTitle = !label && group.title;
-	await chrome.tabGroups.update(group.id, {
-		title: keepTitle ? group.title : title,
-		collapsed: true,
-	});
+	// Collapsed only when this group is new. Collapsing on every refresh of the
+	// list closed whatever the user was looking at, and nothing reopened it,
+	// because from the outside the workspace in front had not changed.
+	const update = { title: keepTitle ? group.title : title };
+	if (isNew) update.collapsed = true;
+	await chrome.tabGroups.update(group.id, update);
 	await saveState();
 	return group;
 }

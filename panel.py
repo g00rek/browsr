@@ -85,7 +85,10 @@ def render(status, note="", width=80):
 
     lines = ["  BROWSR", ""]
     lines.append(f"  Browser        {'running' if status.get('browser') else 'not running'}")
-    lines.append(f"  Bridge         {'answering' if status.get('bridge') else 'not answering'}")
+    # Not "bridge": the person reading this did not build it and has no reason
+    # to know the machinery has a name. What they need to know is whether Herdr
+    # and the browser are still talking.
+    lines.append(f"  Herdr link     {'answering' if status.get('bridge') else 'not answering'}")
     if status.get("extension_stale"):
         lines.append("  Extension      older than the files — restart with [r]")
     else:
@@ -93,7 +96,7 @@ def render(status, note="", width=80):
 
     if strip is None:
         lines.append("")
-        lines.append("  Strip          unknown, the bridge is not saying")
+        lines.append("  Tab groups     unknown, Herdr link is silent")
     else:
         windows = strip.get("windows", 0)
         suffix = "" if windows == 1 else "  <- there should be one"
