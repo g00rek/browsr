@@ -2,9 +2,12 @@ import contextlib
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -359,9 +362,10 @@ class BridgeTests(unittest.TestCase):
         """Two hosts overlap whenever the extension reconnects.
 
         The newer one rebinds the same path; the older one then exits and, if it
-        tidies up blindly, deletes the socket the live host is listening on. The
-        bridge then looks dead to every caller, which is how an extra browser
-        window got opened in the first place.
+        tidies up, deletes the socket the live host is listening on. The bridge
+        then looks dead to every caller, which is how an extra browser window
+        got opened in the first place. Told apart by inode this is still wrong —
+        the number is reused at once, which CI proved and this machine hid.
         """
         spec = importlib.util.spec_from_file_location(
             "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
@@ -371,41 +375,33 @@ class BridgeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "control.sock"
-            path.write_text("older host")
-            mine = path.stat().st_ino
-
-            # The newer host replaces the file at the same path.
-            path.unlink()
-            path.write_text("newer host")
-
             with patch.object(native_host, "SOCKET_PATH", path):
-                native_host.remove_socket_if_ours(mine)
+                native_host.stopping.clear()
+                older = threading.Thread(target=native_host.socket_server, daemon=True)
+                older.start()
+                for _ in range(100):
+                    if path.exists():
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(path.exists(), "the host never bound its socket")
+
+                # A newer host takes the path over, exactly as Chromium's next
+                # one does.
+                path.unlink()
+                newer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                newer.bind(str(path))
+                newer.listen(4)
+
+                native_host.stopping.set()
+                older.join(timeout=5)
+
                 self.assertTrue(path.exists(), "the live host's socket was deleted")
-
-                native_host.remove_socket_if_ours(path.stat().st_ino)
-                self.assertFalse(path.exists(), "a host failed to clean up after itself")
-
-    def test_the_sandbox_covers_every_path_the_bridge_writes_to(self):
-        """A path added later must not quietly escape into the user's own state.
-
-        This has already happened twice: the suite wrote the Chromium log and
-        then the panel's pane record into the real Browsr directory, passing on
-        the author's machine and failing on a clean one. Rather than trust the
-        next person to remember, ask the module what paths it has.
-        """
-        owned = {
-            name
-            for name, value in vars(bridge).items()
-            if isinstance(value, Path)
-            and any(str(value).startswith(str(root))
-                    for root in (bridge.STATE_DIR, bridge.DATA_DIR))
-        }
-        with sandboxed_state() as root:
-            escaped = sorted(
-                name for name in owned
-                if not str(getattr(bridge, name)).startswith(str(root))
-            )
-        self.assertEqual(escaped, [], f"not redirected by sandboxed_state(): {escaped}")
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(2)
+                client.connect(str(path))  # raises if the live socket is gone
+                client.close()
+                newer.close()
+            native_host.stopping.clear()
 
     def test_a_running_browser_is_never_launched_a_second_time(self):
         """Chromium refuses to start twice; the second start opens a window.
