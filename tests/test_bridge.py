@@ -329,29 +329,25 @@ class BridgeTests(unittest.TestCase):
         spec.loader.exec_module(native_host)
         written = []
 
-        class Link:
-            answer = {"workspace_id": "w7", "label": "app"}
-
-            def focused_workspace(self):
-                return self.answer
-
-        link = Link()
+        def listing(focused):
+            return [
+                {"workspace_id": "w7", "label": "app", "focused": focused == "w7"},
+                {"workspace_id": "w8", "label": "docs", "focused": focused == "w8"},
+            ]
 
         with patch.object(native_host, "write_native_message", written.append), \
                 patch.object(native_host.bridge, "herdr_session_id", return_value="/run/h.sock"):
-            last = native_host.focus_step(None, link)
+            last = native_host.focus_step(None, listing("w7"))
             self.assertEqual(last, "w7")
             # Nothing changed, so nothing is said.
-            last = native_host.focus_step(last, link)
+            last = native_host.focus_step(last, listing("w7"))
             self.assertEqual(len(written), 1)
 
-            link.answer = {"workspace_id": "w8", "label": "docs"}
-            last = native_host.focus_step(last, link)
+            last = native_host.focus_step(last, listing("w8"))
             self.assertEqual(last, "w8")
 
-            # Herdr not answering must not be read as a switch.
-            link.answer = None
-            last = native_host.focus_step(last, link)
+            # Nothing focused must not be read as a switch.
+            last = native_host.focus_step(last, listing(None))
             self.assertEqual(last, "w8")
 
         self.assertEqual([m["event"] for m in written], ["focused", "focused"])
@@ -402,6 +398,57 @@ class BridgeTests(unittest.TestCase):
                 client.close()
                 newer.close()
             native_host.stopping.clear()
+
+    def test_a_checkout_is_not_mistaken_for_an_edited_extension(self):
+        """Touching a file is not changing it.
+
+        The fingerprint used size and modification time, so every branch switch
+        announced that the browser was running stale code and asked for a
+        restart it did not need.
+        """
+        with sandboxed_state() as root:
+            extension = root / "extension"
+            (extension / "service-worker.js").write_text("same content")
+            before = bridge.extension_fingerprint()
+
+            os.utime(extension / "service-worker.js", (1_000_000, 1_000_000))
+            self.assertEqual(bridge.extension_fingerprint(), before, "a touch read as an edit")
+
+            (extension / "service-worker.js").write_text("different content")
+            self.assertNotEqual(bridge.extension_fingerprint(), before, "an edit went unnoticed")
+
+    def test_the_watcher_notices_a_workspace_disappearing_too(self):
+        """The strip has to keep matching, not just point at the right group."""
+        spec = importlib.util.spec_from_file_location(
+            "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
+        )
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+        written = []
+
+        both = [
+            {"workspace_id": "w7", "label": "app", "focused": True},
+            {"workspace_id": "w8", "label": "docs"},
+        ]
+        with patch.object(native_host, "write_native_message", written.append), \
+                patch.object(native_host.bridge, "herdr_session_id", return_value="/run/h.sock"):
+            seen = native_host.workspace_step(None, both)
+            self.assertEqual([m["type"] for m in written], ["workspace_set"])
+
+            # Same list again: nothing to say.
+            seen = native_host.workspace_step(seen, both)
+            self.assertEqual(len(written), 1)
+
+            # One closed.
+            seen = native_host.workspace_step(seen, both[:1])
+            self.assertEqual(len(written), 2)
+            self.assertEqual([w["workspace_id"] for w in written[1]["workspaces"]], ["w7"])
+
+            # A rename counts as a change too.
+            native_host.workspace_step(
+                seen, [{"workspace_id": "w7", "label": "renamed", "focused": True}]
+            )
+            self.assertEqual(written[2]["workspaces"][0]["label"], "renamed")
 
     def test_a_running_browser_is_never_launched_a_second_time(self):
         """Chromium refuses to start twice; the second start opens a window.
