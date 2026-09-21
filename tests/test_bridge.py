@@ -30,10 +30,13 @@ def sandboxed_state():
         (root / "profile").mkdir()
         (root / "extension").mkdir()
         with patch.object(bridge, "STATE_DIR", root / "state"), \
+                patch.object(bridge, "DATA_DIR", root / "data"), \
+                patch.object(bridge, "SOCKET_PATH", root / "state" / "control.sock"), \
                 patch.object(bridge, "PROFILE_DIR", root / "profile"), \
                 patch.object(bridge, "LAUNCH_LOCK", root / "state" / "launch.lock"), \
                 patch.object(bridge, "EXTENSION_DIR", root / "extension"), \
-                patch.object(bridge, "EXTENSION_STAMP", root / "state" / "extension.stamp"):
+                patch.object(bridge, "EXTENSION_STAMP", root / "state" / "extension.stamp"), \
+                patch.object(bridge, "PANEL_PANES", root / "state" / "panel-panes.json"):
             yield root
 
 
@@ -170,6 +173,239 @@ class BridgeTests(unittest.TestCase):
 
         self.assertEqual([message["type"] for message in written], ["workspace_set"])
         self.assertEqual(written[0]["workspaces"], [{"workspace_id": "w7", "label": "My app"}])
+
+    def test_status_reports_what_the_panel_has_to_show(self):
+        with patch.object(bridge, "browser_alive", return_value=True), \
+                patch.object(bridge, "bridge_alive", return_value=True), \
+                patch.object(bridge, "extension_is_stale", return_value=False), \
+                patch.object(bridge, "herdr_workspaces", return_value=[
+                    {"workspace_id": "w7", "label": "My app"},
+                    {"workspace_id": "w8"},
+                ]), \
+                patch.object(bridge, "socket_request", lambda message, **kw: {
+                    "ok": True,
+                    "result": {"windows": 1, "ungrouped": 1, "groups": [
+                        {"title": "My app", "tabs": 2, "adopted": False},
+                    ]},
+                }):
+            status = bridge.browser_status()
+
+        self.assertTrue(status["browser"])
+        self.assertTrue(status["bridge"])
+        self.assertFalse(status["extension_stale"])
+        # A workspace with no label still has to be nameable on screen.
+        self.assertEqual(status["workspaces"], ["My app", "w8"])
+        self.assertEqual(status["strip"]["windows"], 1)
+
+    def test_status_still_answers_when_nothing_is_running(self):
+        """The panel exists for exactly this moment; it must not crash into it."""
+        def refuse(message, **kwargs):
+            raise RuntimeError("The Chromium bridge did not answer")
+
+        with patch.object(bridge, "browser_alive", return_value=False), \
+                patch.object(bridge, "bridge_alive", return_value=False), \
+                patch.object(bridge, "extension_is_stale", return_value=True), \
+                patch.object(bridge, "herdr_workspaces", return_value=None), \
+                patch.object(bridge, "socket_request", refuse):
+            status = bridge.browser_status()
+
+        self.assertFalse(status["browser"])
+        self.assertIsNone(status["strip"])
+        self.assertEqual(status["workspaces"], [])
+
+    def test_only_the_browsr_process_is_ever_signalled(self):
+        """Browsr shares its binary with the browser the user lives in.
+
+        The profile directory is the only thing that tells them apart, and the
+        helper processes carry it too, so matching on it alone would signal the
+        renderers as well as the browser.
+
+        Both argv shapes appear here on purpose. Chromium rewrites its own
+        command line into one space-separated blob with no NUL separators, and a
+        version of this that only understood the normal shape passed against a
+        made-up /proc while finding nothing at all on the running browser.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            separated = {
+                "12": ["chromium", "--type=renderer", "--user-data-dir=/prof/chromium"],
+                "13": ["chromium", "--user-data-dir=/somewhere/else"],
+                "14": ["python3", "unrelated.py"],
+                "15": ["chromium", "--user-data-dir=/prof/chromium-other"],
+            }
+            for name, argv in separated.items():
+                (proc / name).mkdir()
+                (proc / name / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+            # The real browser, exactly as Chromium leaves it.
+            (proc / "11").mkdir()
+            (proc / "11" / "cmdline").write_bytes(
+                b"/usr/lib/chromium/chromium --user-data-dir=/prof/chromium --new-window\0"
+            )
+            (proc / "self").mkdir()
+            (proc / "self" / "cmdline").write_bytes(b"not a pid\0")
+
+            with patch.object(bridge, "PROFILE_DIR", Path("/prof/chromium")):
+                self.assertEqual(bridge.browser_pids(proc), [11])
+
+    def test_the_key_opens_focuses_then_closes(self):
+        """The convention every other Herdr sidebar plugin follows.
+
+        Pressing the key while working in another pane should bring the panel
+        under the cursor, not destroy it; only pressing it while already in the
+        panel closes it.
+        """
+        ran = []
+        call = lambda *argv: ran.append(argv) or ""
+
+        with sandboxed_state(), \
+                patch.object(bridge, "herdr_call", call), \
+                patch.object(bridge, "current_tab_id", return_value="w7:t1"):
+            # Nothing open yet.
+            with patch.object(bridge, "focused_pane_id", return_value="w7:p1"):
+                bridge.toggle_panel()
+            self.assertIn("open", ran[0])
+
+            bridge.record_panel_pane("w7:t1", "w7:p3")
+            ran.clear()
+
+            # Open, but the cursor is elsewhere.
+            with patch.object(bridge, "live_pane_ids", return_value={"w7:p1", "w7:p3"}), \
+                    patch.object(bridge, "focused_pane_id", return_value="w7:p1"):
+                bridge.toggle_panel()
+            self.assertEqual(ran, [("plugin", "pane", "focus", "w7:p3")])
+            ran.clear()
+
+            # Open, and the cursor is already in it.
+            with patch.object(bridge, "live_pane_ids", return_value={"w7:p1", "w7:p3"}), \
+                    patch.object(bridge, "focused_pane_id", return_value="w7:p3"):
+                bridge.toggle_panel()
+            self.assertEqual(ran, [("plugin", "pane", "close", "w7:p3")])
+
+    def test_a_panel_that_died_without_tidying_up_reopens(self):
+        """A crash leaves the recorded pane id behind; the key must still work."""
+        ran = []
+
+        with sandboxed_state(), \
+                patch.object(bridge, "herdr_call", lambda *argv: ran.append(argv) or ""), \
+                patch.object(bridge, "current_tab_id", return_value="w7:t1"), \
+                patch.object(bridge, "focused_pane_id", return_value="w7:p1"), \
+                patch.object(bridge, "live_pane_ids", return_value={"w7:p1"}):
+            bridge.record_panel_pane("w7:t1", "w7:p3")
+            bridge.toggle_panel()
+
+        self.assertIn("open", ran[0])
+
+    def test_the_panel_in_another_tab_is_left_alone(self):
+        ran = []
+
+        with sandboxed_state(), \
+                patch.object(bridge, "herdr_call", lambda *argv: ran.append(argv) or ""), \
+                patch.object(bridge, "live_pane_ids", return_value={"w7:p3", "w8:p2"}), \
+                patch.object(bridge, "focused_pane_id", return_value="w8:p2"):
+            bridge.record_panel_pane("w7:t1", "w7:p3")
+            bridge.record_panel_pane("w8:t1", "w8:p2")
+            with patch.object(bridge, "current_tab_id", return_value="w8:t1"):
+                bridge.toggle_panel()
+
+        self.assertEqual(ran, [("plugin", "pane", "close", "w8:p2")])
+
+    def test_the_browser_follows_the_focused_workspace_however_it_was_switched(self):
+        """Herdr does not call a plugin when the user switches with the mouse.
+
+        Verified against this machine's Herdr 0.9.1: a switch made through the
+        API is dispatched to plugins within the same second, while six switches
+        made in the UI left no plugin invocation at all, though the server
+        recorded every one of them. Waiting to be told is therefore not a
+        mechanism; the host asks instead, and speaks only when the answer
+        changes.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
+        )
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+        written = []
+
+        class Link:
+            answer = {"workspace_id": "w7", "label": "app"}
+
+            def focused_workspace(self):
+                return self.answer
+
+        link = Link()
+
+        with patch.object(native_host, "write_native_message", written.append), \
+                patch.object(native_host.bridge, "herdr_session_id", return_value="/run/h.sock"):
+            last = native_host.focus_step(None, link)
+            self.assertEqual(last, "w7")
+            # Nothing changed, so nothing is said.
+            last = native_host.focus_step(last, link)
+            self.assertEqual(len(written), 1)
+
+            link.answer = {"workspace_id": "w8", "label": "docs"}
+            last = native_host.focus_step(last, link)
+            self.assertEqual(last, "w8")
+
+            # Herdr not answering must not be read as a switch.
+            link.answer = None
+            last = native_host.focus_step(last, link)
+            self.assertEqual(last, "w8")
+
+        self.assertEqual([m["event"] for m in written], ["focused", "focused"])
+        self.assertEqual([m["workspace_id"] for m in written], ["w7", "w8"])
+        self.assertEqual(written[1]["label"], "docs")
+
+    def test_an_exiting_bridge_does_not_delete_the_live_one(self):
+        """Two hosts overlap whenever the extension reconnects.
+
+        The newer one rebinds the same path; the older one then exits and, if it
+        tidies up blindly, deletes the socket the live host is listening on. The
+        bridge then looks dead to every caller, which is how an extra browser
+        window got opened in the first place.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
+        )
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "control.sock"
+            path.write_text("older host")
+            mine = path.stat().st_ino
+
+            # The newer host replaces the file at the same path.
+            path.unlink()
+            path.write_text("newer host")
+
+            with patch.object(native_host, "SOCKET_PATH", path):
+                native_host.remove_socket_if_ours(mine)
+                self.assertTrue(path.exists(), "the live host's socket was deleted")
+
+                native_host.remove_socket_if_ours(path.stat().st_ino)
+                self.assertFalse(path.exists(), "a host failed to clean up after itself")
+
+    def test_the_sandbox_covers_every_path_the_bridge_writes_to(self):
+        """A path added later must not quietly escape into the user's own state.
+
+        This has already happened twice: the suite wrote the Chromium log and
+        then the panel's pane record into the real Browsr directory, passing on
+        the author's machine and failing on a clean one. Rather than trust the
+        next person to remember, ask the module what paths it has.
+        """
+        owned = {
+            name
+            for name, value in vars(bridge).items()
+            if isinstance(value, Path)
+            and any(str(value).startswith(str(root))
+                    for root in (bridge.STATE_DIR, bridge.DATA_DIR))
+        }
+        with sandboxed_state() as root:
+            escaped = sorted(
+                name for name in owned
+                if not str(getattr(bridge, name)).startswith(str(root))
+            )
+        self.assertEqual(escaped, [], f"not redirected by sandboxed_state(): {escaped}")
 
     def test_a_running_browser_is_never_launched_a_second_time(self):
         """Chromium refuses to start twice; the second start opens a window.
