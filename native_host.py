@@ -65,7 +65,32 @@ def reconcile_workspaces():
 FOCUS_POLL_SECONDS = 0.2
 
 
-def focus_step(last_workspace_id, link):
+def workspace_step(seen, listing):
+    """Keep the strip matching Herdr, not just pointing at the right group.
+
+    The focus watch below already has the whole list in hand every time it
+    asks, so noticing that a workspace was closed or renamed costs nothing
+    extra — and without it a workspace closed while switching with the mouse
+    would leave its tab group behind until the browser was restarted.
+    """
+    current = [
+        {
+            "workspace_id": item["workspace_id"],
+            "label": item.get("label") or item["workspace_id"],
+        }
+        for item in listing
+    ]
+    if current == seen:
+        return seen
+    write_native_message({
+        "type": "workspace_set",
+        "session_id": bridge.herdr_session_id(),
+        "workspaces": current,
+    })
+    return current
+
+
+def focus_step(last_workspace_id, listing):
     """Tell the extension which workspace is in front, but only when it changes.
 
     Herdr does not call a plugin when the workspace is switched in the UI —
@@ -75,7 +100,7 @@ def focus_step(last_workspace_id, link):
     asks, once a second, and speaks only when the answer is different: at most
     one message per switch, which is less traffic than being told would be.
     """
-    focused = link.focused_workspace()
+    focused = next((item for item in listing if item.get("focused")), None)
     if not focused or focused["workspace_id"] == last_workspace_id:
         return last_workspace_id
     write_native_message({
@@ -90,13 +115,18 @@ def focus_step(last_workspace_id, link):
 
 def watch_focus():
     link = bridge.HerdrLink()
-    last = None
+    last, seen = None, None
     try:
         while not stopping.is_set():
             try:
-                last = focus_step(last, link)
+                # One question per tick answers both: which workspaces exist,
+                # and which of them is in front.
+                listing = link.workspaces()
+                if listing:
+                    seen = workspace_step(seen, listing)
+                    last = focus_step(last, listing)
             except Exception as error:
-                print(f"Herdr focus watch failed: {error}", file=sys.stderr)
+                print(f"Herdr watch failed: {error}", file=sys.stderr)
             stopping.wait(FOCUS_POLL_SECONDS)
     finally:
         link.close()

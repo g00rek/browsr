@@ -176,6 +176,30 @@ test('the extension can describe the strip it is showing', async () => {
 	assert.equal(typeof answer.result.ungrouped, 'number');
 });
 
+test('refreshing the list does not collapse the group the user is in', async () => {
+	// Collapsing every group on each refresh left nothing open whenever a
+	// workspace was closed, because the active one had not changed and so
+	// nothing expanded it again.
+	const harness = await boot({ windows: [1] });
+	await harness.deliver(workspaceSet(SESSION, ['w16', 'TasteRay'], ['w1R', 'tr']));
+	await harness.deliver({
+		type: 'workspace', event: 'focused', session_id: SESSION,
+		workspace_id: 'w16', label: 'TasteRay',
+	});
+	const open = () => harness.state.groups.filter(group => !group.collapsed).map(g => g.title);
+	assert.deepEqual(open(), ['TasteRay']);
+
+	await harness.deliver(workspaceSet(SESSION, ['w16', 'TasteRay'], ['w1R', 'tr'], ['w2', 'new']));
+
+	assert.deepEqual(open(), ['TasteRay'], 'the refresh closed the group in front');
+});
+
+test('a group made for a new workspace starts collapsed', async () => {
+	const harness = await boot({ windows: [1] });
+	await harness.deliver(workspaceSet(SESSION, ['w16', 'TasteRay']));
+	assert.deepEqual(harness.state.groups.map(g => g.collapsed), [true]);
+});
+
 test('group ids left over from a previous browser run are dropped, not carried', async () => {
 	const harness = await boot({
 		windows: [1],

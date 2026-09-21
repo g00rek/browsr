@@ -76,7 +76,7 @@ class PanelTests(unittest.TestCase):
             "workspaces": [], "strip": None,
         })
         self.assertIn("Browser        not running", text)
-        self.assertIn("Bridge         not answering", text)
+        self.assertIn("Herdr link     not answering", text)
         self.assertIn("[r] restart", text)
 
     def test_tab_counts_read_correctly(self):
