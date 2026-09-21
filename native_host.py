@@ -10,6 +10,9 @@ import sys
 import threading
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bridge  # noqa: E402  (same directory, and only for its Herdr helpers)
+
 STATE_DIR = Path.home() / ".local/state/herdr-dev-browser"
 SOCKET_PATH = STATE_DIR / "control.sock"
 MAX_MESSAGE = 1024 * 1024
@@ -43,12 +46,29 @@ def write_native_message(message):
         sys.stdout.buffer.flush()
 
 
+def reconcile_workspaces():
+    """Send the extension the whole workspace list, down the pipe it opened.
+
+    Chromium stops an idle extension and starts it again on the next event, and
+    nothing in the plugin runs when that happens — so a browser left running for
+    days keeps whatever strip it drifted into. The extension announcing itself
+    is the one moment that is guaranteed to follow every such restart.
+    """
+    workspaces = bridge.herdr_workspaces()
+    if not workspaces:
+        return
+    write_native_message(bridge.workspace_set_message(workspaces))
+
+
 def native_reader():
     try:
         while not stopping.is_set():
             message = read_native_message()
             if message is None:
                 break
+            if message.get("type") == "ready":
+                threading.Thread(target=reconcile_workspaces, daemon=True).start()
+                continue
             if message.get("type") == "response" and message.get("request_id"):
                 with pending_lock:
                     target = pending.get(message["request_id"])

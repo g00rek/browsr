@@ -93,6 +93,84 @@ class BridgeTests(unittest.TestCase):
         # protocol: the two must never be mistaken for one another.
         self.assertNotEqual(bridge.DEVTOOLS_PORT, 9222)
 
+    def test_switching_workspace_carries_the_whole_list(self):
+        """The strip has to be able to come back from a dropped event.
+
+        Workspace events are fire-and-forget: one that happens while the bridge
+        is down is never resent, and the group it should have added or removed
+        stays wrong for as long as the browser runs. Sending the full list
+        alongside the switch — the one event that happens all day and cannot
+        race with the workspace it names — makes that self-correcting.
+        """
+        sent = []
+        event = {"event": "workspace_focused"}
+        context = {"workspace_id": "w7", "workspace_label": "My app"}
+
+        with patch.dict(os.environ, {
+            "HERDR_PLUGIN_EVENT_JSON": json.dumps(event),
+            "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context),
+            "HERDR_SOCKET_PATH": "/run/herdr.sock",
+        }, clear=True), \
+                patch.object(bridge, "bridge_alive", return_value=True), \
+                patch.object(bridge, "herdr_workspaces", return_value=[
+                    {"workspace_id": "w7", "label": "My app"},
+                    {"workspace_id": "w8", "label": "Other"},
+                ]), \
+                patch.object(bridge, "socket_request", lambda message, **kw: sent.append(message)):
+            bridge.hook()
+
+        self.assertEqual([message["type"] for message in sent], ["workspace_set", "workspace"])
+        self.assertEqual(
+            [item["workspace_id"] for item in sent[0]["workspaces"]], ["w7", "w8"]
+        )
+        self.assertEqual(sent[0]["session_id"], "/run/herdr.sock")
+        self.assertEqual(sent[1]["event"], "focused")
+
+    def test_a_workspace_switch_survives_herdr_not_answering(self):
+        sent = []
+        event = {"event": "workspace_focused"}
+        context = {"workspace_id": "w7", "workspace_label": "My app"}
+
+        with patch.dict(os.environ, {
+            "HERDR_PLUGIN_EVENT_JSON": json.dumps(event),
+            "HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context),
+            "HERDR_SOCKET_PATH": "/run/herdr.sock",
+        }, clear=True), \
+                patch.object(bridge, "bridge_alive", return_value=True), \
+                patch.object(bridge, "herdr_workspaces", return_value=None), \
+                patch.object(bridge, "socket_request", lambda message, **kw: sent.append(message)):
+            bridge.hook()
+
+        self.assertEqual([message["type"] for message in sent], ["workspace"])
+
+    def test_the_extension_announcing_itself_reconciles_the_strip(self):
+        """A service worker that wakes on its own is nobody's launch.
+
+        Chromium stops an idle extension and starts it again on the next event,
+        and nothing in the plugin runs when it does. Until the extension itself
+        is the trigger, a browser left running for days keeps whatever strip it
+        drifted into.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
+        )
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+        written = []
+
+        # native_host imports bridge by name, which is a different module object
+        # from the one this suite loads by path; patch the one it actually holds.
+        with patch.object(native_host, "write_native_message", written.append), \
+                patch.object(native_host.bridge, "herdr_workspaces", return_value=[
+                    {"workspace_id": "w7", "label": "My app"},
+                ]), \
+                patch.object(native_host.bridge, "herdr_session_id",
+                             return_value="/run/herdr.sock"):
+            native_host.reconcile_workspaces()
+
+        self.assertEqual([message["type"] for message in written], ["workspace_set"])
+        self.assertEqual(written[0]["workspaces"], [{"workspace_id": "w7", "label": "My app"}])
+
     def test_a_running_browser_is_never_launched_a_second_time(self):
         """Chromium refuses to start twice; the second start opens a window.
 
