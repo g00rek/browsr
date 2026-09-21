@@ -212,33 +212,54 @@ def show_window():
     return False
 
 
-def sync_workspaces():
+def herdr_workspaces():
+    """Herdr's own workspace list, or None when it will not answer.
+
+    None and an empty list are different answers and must stay different: the
+    extension treats an empty list as "say nothing" precisely so that a Herdr
+    that is down cannot be read as a user with no workspaces.
+    """
     herdr = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
     if not herdr:
-        return
+        return None
     try:
         output = subprocess.run(
             [herdr, "workspace", "list"], capture_output=True, text=True,
             timeout=8, check=True,
         )
-        workspaces = json.loads(output.stdout)["result"]["workspaces"]
+        return json.loads(output.stdout)["result"]["workspaces"] or None
+    except (OSError, KeyError, ValueError, subprocess.SubprocessError,
+            json.JSONDecodeError):
+        return None
+
+
+def workspace_set_message(workspaces, session_id=None):
+    return {
+        "type": "workspace_set",
+        "session_id": session_id or herdr_session_id(),
+        "workspaces": [
+            {
+                "workspace_id": workspace["workspace_id"],
+                "label": workspace.get("label") or workspace["workspace_id"],
+            }
+            for workspace in workspaces
+        ],
+    }
+
+
+def sync_workspaces():
+    workspaces = herdr_workspaces()
+    if not workspaces:
+        return
+    try:
         session_id = herdr_session_id()
         # The whole set in one message, not a workspace at a time. A workspace
         # closed while the bridge was down leaves an event that is never resent,
         # so the strip could only ever grow; sending the full list lets the
         # extension take away what Herdr no longer has.
-        socket_request({
-            "type": "workspace_set",
-            "request_id": uuid.uuid4().hex,
-            "session_id": session_id,
-            "workspaces": [
-                {
-                    "workspace_id": workspace["workspace_id"],
-                    "label": workspace.get("label") or workspace["workspace_id"],
-                }
-                for workspace in workspaces
-            ],
-        }, timeout=20)
+        message = workspace_set_message(workspaces, session_id)
+        message["request_id"] = uuid.uuid4().hex
+        socket_request(message, timeout=20)
         focused = next((item for item in workspaces if item.get("focused")), None)
         if focused:
             socket_request({
@@ -249,8 +270,7 @@ def sync_workspaces():
                 "workspace_id": focused["workspace_id"],
                 "label": focused.get("label") or focused["workspace_id"],
             }, timeout=10)
-    except (OSError, KeyError, ValueError, subprocess.SubprocessError,
-            json.JSONDecodeError):
+    except (OSError, RuntimeError, json.JSONDecodeError):
         return
 
 
@@ -380,7 +400,22 @@ def event_command():
 def hook():
     if not bridge_alive():
         return
-    socket_request(event_command())
+    command = event_command()
+    try:
+        # A switch is the one event that happens all day and cannot race with
+        # the workspace it names, so it carries the whole list. Events are
+        # fire-and-forget: one lost while the bridge was down is never resent,
+        # and without this the strip stays wrong until the browser restarts.
+        if command["event"] == "focused":
+            workspaces = herdr_workspaces()
+            if workspaces:
+                socket_request(workspace_set_message(workspaces, command["session_id"]))
+        socket_request(command)
+    except (OSError, RuntimeError, json.JSONDecodeError):
+        # The bridge can go down between the check above and the send. Switching
+        # workspace must not fail in Herdr's face over it; the next switch, or
+        # the extension coming back, puts the strip right.
+        return
 
 
 def is_local_url(raw):
@@ -463,13 +498,15 @@ def main():
         open_url(sys.argv[2])
         return
     if len(sys.argv) != 2 or sys.argv[1] not in {
-        "setup", "launch", "hook", "open-link", "workspace-tabs", "mcp-endpoint"
+        "setup", "launch", "sync", "hook", "open-link", "workspace-tabs", "mcp-endpoint"
     }:
         raise RuntimeError(
-            "Użycie: bridge.py setup|launch|hook|open-link|open-url URL|workspace-tabs|mcp-endpoint"
+            "Użycie: bridge.py setup|launch|sync|hook|open-link|open-url URL"
+            "|workspace-tabs|mcp-endpoint"
         )
     {
         "setup": setup,
+        "sync": sync_workspaces,
         "launch": launch,
         "hook": hook,
         "open-link": open_link,
