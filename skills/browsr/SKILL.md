@@ -1,6 +1,6 @@
 ---
 name: browsr
-description: Use for EVERY browser action from Claude Code inside Herdr — localhost UIs and logged-in admin consoles alike (Google Cloud, Cloudflare, PostHog, Meta, AppsFlyer, GitHub settings). Routes Chrome DevTools work to the Browsr tab group of the current Herdr workspace; never his daily Chrome (chrome-mine), never a separate test browser.
+description: Use for every browser action from Claude Code inside Herdr: localhost UIs, public pages and logged-in admin consoles (Google Cloud, Cloudflare, PostHog, Meta, AppsFlyer, GitHub settings). Routes Chrome DevTools work to the Browsr tab group of the current Herdr workspace.
 ---
 
 # Browsr
@@ -32,11 +32,8 @@ Several Claude sessions may share Browsr concurrently. A tab selected for this
 workspace remains this session's target even if the user focuses another Herdr
 workspace. Re-resolve the page only if it closes or the MCP reconnects.
 
-Every browser action goes through Browsr, authenticated admin consoles included
-(Google Cloud, Cloudflare, PostHog, Meta, AppsFlyer, GitHub settings). `bridge.py
-open-url` only opens localhost, so for an external console navigate a tab that is
-already in this workspace's group and send it back to its localhost URL afterwards.
-A login wall there is reported in one line, never typed through. Never fall back to
-`chrome-mine` (his daily Chrome): each attach asks him to allow remote debugging and
-hangs when he is away. It is also denied by a permission rule in
-`~/.claude/settings.json`.
+This skill covers every browser action, logged-in consoles included (Google Cloud,
+Cloudflare, PostHog, Meta, AppsFlyer, GitHub settings). `bridge.py open-url` opens
+localhost only; for any other address, navigate a tab that is already in this
+workspace's group, then send it back to its localhost URL. If a page asks to log in or
+re-enter a password, report it in one line.
