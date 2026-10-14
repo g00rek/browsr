@@ -1,3 +1,5 @@
+<img src="assets/logo.png" alt="" width="104" align="right">
+
 # Browsr
 
 A Herdr plugin that gives every workspace its own group of browser tabs, in a
