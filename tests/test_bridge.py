@@ -91,7 +91,7 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.subprocess, "Popen", fake_popen), \
                 patch.object(bridge, "show_window", lambda: None), \
                 patch.object(bridge, "sync_workspaces", lambda: None):
-            bridge.ensure_browser(wait=True)
+            bridge.ensure_browser(wait=True, may_launch=True)
 
         self.assertIn(f"--remote-debugging-port={bridge.DEVTOOLS_PORT}", launched["argv"])
         self.assertNotIn("--remote-debugging-port=0", launched["argv"])
@@ -450,6 +450,148 @@ class BridgeTests(unittest.TestCase):
             )
             self.assertEqual(written[2]["workspaces"][0]["label"], "renamed")
 
+    def test_cleanup_removes_what_we_put_outside_our_own_directory(self):
+        """Herdr has no uninstall hook, so this has to be asked for.
+
+        Uninstalling unregisters the plugin and deletes its checkout; the files
+        this one writes elsewhere — the two manifests that let Chromium talk to
+        Herdr, and the state directory — would otherwise stay behind for good.
+        """
+        with sandboxed_state() as root:
+            hosts = [
+                root / "profile" / "NativeMessagingHosts" / "dev.herdr.browser.json",
+                root / "chromium-config" / "NativeMessagingHosts" / "dev.herdr.browser.json",
+            ]
+            for path in hosts:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}")
+            (root / "state" / "control.sock").write_text("")
+            (root / "profile" / "Default").mkdir(parents=True, exist_ok=True)
+            (root / "profile" / "Default" / "History").write_text("x" * 2048)
+
+            with patch.object(bridge, "NATIVE_HOST_MANIFESTS", hosts):
+                removed, profile, size = bridge.cleanup()
+
+            # Inside the temporary directory on purpose: asserting that a file
+            # is gone after the directory holding it has been swept away proves
+            # nothing at all.
+            self.assertTrue(all(not path.exists() for path in hosts), "a manifest survived")
+            self.assertFalse((root / "state").exists(), "the state directory survived")
+            self.assertEqual(sorted(removed), sorted(str(p) for p in hosts + [root / "state"]))
+            # The profile holds the user's own browsing; it is reported, never deleted.
+            self.assertTrue(profile.exists(), "the browsing profile was deleted")
+            self.assertGreater(size, 2000)
+
+    def test_cleanup_is_quiet_when_there_is_nothing_to_remove(self):
+        with sandboxed_state() as root:
+            missing = [root / "nowhere" / "dev.herdr.browser.json"]
+            with patch.object(bridge, "NATIVE_HOST_MANIFESTS", missing):
+                removed, profile, size = bridge.cleanup()
+            self.assertEqual(removed, [str(root / "state")])
+
+    def test_a_silent_failure_is_announced_once(self):
+        """Browser up, extension not answering: tabs stop following, quietly.
+
+        That is the failure that went unnoticed for a week. It is only worth
+        announcing when the browser is actually running — a closed browser is
+        not a fault — and only after it has lasted, because the extension is a
+        service worker Chromium stops and starts at will.
+        """
+        shown = []
+        state = None
+
+        with patch.object(bridge, "browser_alive", return_value=True), \
+                patch.object(bridge, "bridge_alive", return_value=False), \
+                patch.object(bridge, "herdr_call", lambda *argv: shown.append(argv) or ""):
+            state = bridge.health_step(None, 1000.0)
+            self.assertEqual(shown, [], "announced before the grace period")
+
+            state = bridge.health_step(state, 1000.0 + bridge.HEALTH_GRACE_SECONDS - 1)
+            self.assertEqual(shown, [], "announced one second early")
+
+            state = bridge.health_step(state, 1000.0 + bridge.HEALTH_GRACE_SECONDS)
+            self.assertEqual(len(shown), 1, "never announced")
+            self.assertEqual(shown[0][:2], ("notification", "show"))
+
+            # Still broken a minute later: say it once, not every minute.
+            state = bridge.health_step(state, 2000.0)
+            self.assertEqual(len(shown), 1, "repeated itself")
+
+    def test_a_closed_browser_is_not_a_fault(self):
+        shown = []
+        with patch.object(bridge, "browser_alive", return_value=False), \
+                patch.object(bridge, "bridge_alive", return_value=False), \
+                patch.object(bridge, "herdr_call", lambda *argv: shown.append(argv) or ""):
+            state = bridge.health_step(None, 1000.0)
+            state = bridge.health_step(state, 1000.0 + bridge.HEALTH_GRACE_SECONDS * 5)
+        self.assertEqual(shown, [])
+
+    def test_recovering_arms_the_warning_again(self):
+        shown = []
+        healthy = {"browser": True, "bridge": True}
+
+        def alive(which):
+            return lambda: healthy[which]
+
+        with patch.object(bridge, "browser_alive", alive("browser")), \
+                patch.object(bridge, "bridge_alive", alive("bridge")), \
+                patch.object(bridge, "herdr_call", lambda *argv: shown.append(argv) or ""):
+            healthy["bridge"] = False
+            state = bridge.health_step(None, 0.0)
+            state = bridge.health_step(state, bridge.HEALTH_GRACE_SECONDS)
+            self.assertEqual(len(shown), 1)
+
+            healthy["bridge"] = True
+            state = bridge.health_step(state, bridge.HEALTH_GRACE_SECONDS + 1)
+
+            healthy["bridge"] = False
+            state = bridge.health_step(state, bridge.HEALTH_GRACE_SECONDS + 2)
+            state = bridge.health_step(state, bridge.HEALTH_GRACE_SECONDS * 3)
+
+        self.assertEqual(len(shown), 2, "a second outage went unannounced")
+
+    def test_only_the_launch_action_may_start_the_browser(self):
+        """Browsr is a window on the user's screen; it appears when asked for.
+
+        Every other path — an agent opening a page, a question about the tabs,
+        and above all the browser tooling that starts with every agent session
+        — used to launch it, so the browser appeared on its own whenever a
+        session happened to start.
+        """
+        for command, arguments in (
+            (bridge.open_url, ("http://localhost:3000/",)),
+            (bridge.workspace_tabs, ()),
+            (bridge.devtools_endpoint, ()),
+            (bridge.open_link, ()),
+        ):
+            launched = []
+            with sandboxed_state(), \
+                    patch.dict(os.environ, {
+                        "HERDR_WORKSPACE_ID": "w7",
+                        "HERDR_PLUGIN_CONTEXT_JSON": json.dumps({
+                            "workspace_id": "w7", "clicked_url": "http://localhost:3000/",
+                        }),
+                    }, clear=True), \
+                    patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
+                    patch.object(bridge, "bridge_alive", return_value=False), \
+                    patch.object(bridge, "browser_alive", return_value=False), \
+                    patch.object(bridge.subprocess, "Popen", lambda *a, **k: launched.append(a)):
+                with self.assertRaises(RuntimeError, msg=command.__name__):
+                    command(*arguments)
+            self.assertEqual(launched, [], f"{command.__name__} started the browser")
+
+    def test_the_launch_action_still_starts_it(self):
+        launched = []
+        with sandboxed_state(), \
+                patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
+                patch.object(bridge, "bridge_alive", side_effect=[False, False, True]), \
+                patch.object(bridge, "browser_alive", return_value=False), \
+                patch.object(bridge.subprocess, "Popen", lambda *a, **k: launched.append(a)), \
+                patch.object(bridge, "show_window", lambda: True), \
+                patch.object(bridge, "sync_workspaces", lambda: None):
+            bridge.launch()
+        self.assertEqual(len(launched), 1, "the one action that may start it did not")
+
     def test_a_running_browser_is_never_launched_a_second_time(self):
         """Chromium refuses to start twice; the second start opens a window.
 
@@ -468,7 +610,7 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.subprocess, "Popen", lambda *a, **k: launched.append(a)), \
                 patch.object(bridge, "sync_workspaces", lambda: None):
             with self.assertRaises(RuntimeError):
-                bridge.ensure_browser(wait=True)
+                bridge.ensure_browser(wait=True, may_launch=True)
 
         self.assertEqual(launched, [])
 

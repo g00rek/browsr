@@ -1,8 +1,20 @@
 id = "g00rek.browsr"
 name = "Browsr"
-version = "0.6.0"
+version = "0.7.0"
 min_herdr_version = "0.8.2"
 description = "Keep a dedicated Chromium tab group aligned with each Herdr workspace"
+platforms = ["linux"]
+
+# Run at install time, so a machine without Chromium says so there and then
+# rather than at first use, from inside the browser launcher.
+[[build]]
+command = ["./bridge.py", "setup"]
+platforms = ["linux"]
+
+# Watches for the one failure that makes no noise: the browser running while
+# its extension has stopped answering, so tab groups quietly stop following.
+[[startup]]
+command = ["./bridge.py", "watch"]
 platforms = ["linux"]
 
 [[actions]]
@@ -25,6 +37,16 @@ title = "Browsr panel"
 description = "Open the Browsr panel, or close it if it is already open"
 contexts = ["workspace"]
 command = ["./bridge.py", "panel"]
+
+# Herdr's uninstall unregisters the plugin and removes its checkout, and there
+# is no hook to run on the way out, so taking back what we wrote elsewhere has
+# to be something the user can ask for.
+[[actions]]
+id = "cleanup"
+title = "Browsr: remove what it installed"
+description = "Unhook Chromium from Herdr and delete Browsr's state; the browsing profile is left alone"
+contexts = ["workspace"]
+command = ["./bridge.py", "cleanup"]
 
 [[actions]]
 id = "open-link"

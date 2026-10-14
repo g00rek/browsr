@@ -5,12 +5,15 @@ description: Use for every browser action from Claude Code inside Herdr: localho
 
 # Browsr
 
+`<browsr>` below is the directory the Browsr plugin was cloned into;
+`herdr plugin list` prints it. Replace it when you install this skill.
+
 Use the `chrome-devtools` MCP for localhost browser work. It attaches to the
 shared, visible Browsr Chromium. Do not use Playwright or launch another browser.
 
 Before the first page-scoped browser action:
 
-1. Run `~/projects/browsr/bridge.py workspace-tabs`. This returns only
+1. Run `<browsr>/bridge.py workspace-tabs`. This returns only
    the tabs owned by `HERDR_WORKSPACE_ID`.
 2. Call `list_pages` in `chrome-devtools` and select the `pageId` whose URL
    exactly matches one of the returned workspace tabs.
@@ -21,7 +24,7 @@ If the workspace has no appropriate page, determine the local development URL
 from the project or server output and run:
 
 ```bash
-~/projects/browsr/bridge.py open-url http://localhost:PORT
+<browsr>/bridge.py open-url http://localhost:PORT
 ```
 
 Then repeat `workspace-tabs` and `list_pages`. Do not use `new_page` for a

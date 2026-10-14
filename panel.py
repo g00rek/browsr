@@ -147,6 +147,17 @@ def act(key):
     """Run one key's action. Returns the line to show, or None to quit."""
     if key in ("q", "\x1b", "\x03"):
         return None
+    try:
+        return run(key)
+    except Exception as error:
+        # The panel is open precisely when things are failing, and restarting
+        # raises whenever the browser comes up but the extension does not
+        # answer. Letting that through closed the pane and left the user with
+        # neither a browser nor the screen explaining why.
+        return str(error) or error.__class__.__name__
+
+
+def run(key):
     if key == "p":
         return "Showing Browsr..." if bridge.show_window() else "No Browsr window found."
     if key == "s":

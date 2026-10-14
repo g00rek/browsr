@@ -31,6 +31,11 @@ DEFAULT_HERDR_SOCKET = Path.home() / ".config/herdr/herdr.sock"
 # How long the extension gets to answer once Chromium is up. It is a service
 # worker, so Chromium may have to start it first.
 BRIDGE_WAIT_SECONDS = 15
+HEALTH_POLL_SECONDS = 10
+# Long enough that Chromium stopping and restarting an idle extension, which it
+# does on its own schedule, is not reported as a fault.
+HEALTH_GRACE_SECONDS = 60
+HEALTH_LOCK = STATE_DIR / "health.lock"
 _HERDR_SOCKET_CACHE = None
 HOST_NAME = "dev.herdr.browser"
 EXTENSION_ID = "lnknfooimknfekkpecbjnkjcjhdjmekj"
@@ -66,10 +71,23 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
+def native_host_manifests():
+    return [
+        PROFILE_DIR / "NativeMessagingHosts" / f"{HOST_NAME}.json",
+        Path.home() / ".config/chromium/NativeMessagingHosts" / f"{HOST_NAME}.json",
+    ]
+
+
+NATIVE_HOST_MANIFESTS = None
+
+
 def setup():
     chromium = shutil.which("chromium")
     if not chromium:
-        raise RuntimeError("Chromium is not on PATH")
+        raise RuntimeError(
+            "Chromium is not on PATH. Browsr drives its own Chromium profile; "
+            "install chromium and run this again."
+        )
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -79,11 +97,7 @@ def setup():
         "type": "stdio",
         "allowed_origins": [f"chrome-extension://{EXTENSION_ID}/"],
     }
-    destinations = [
-        PROFILE_DIR / "NativeMessagingHosts" / f"{HOST_NAME}.json",
-        Path.home() / ".config/chromium/NativeMessagingHosts" / f"{HOST_NAME}.json",
-    ]
-    for destination in destinations:
+    for destination in NATIVE_HOST_MANIFESTS or native_host_manifests():
         atomic_json(destination, manifest)
     atomic_json(STATE_DIR / "config.json", {
         "chromium": chromium,
@@ -453,7 +467,7 @@ def sync_workspaces():
 
 
 def launch(wait=True):
-    return ensure_browser(wait=wait, show=True, sync=True)
+    return ensure_browser(wait=wait, show=True, sync=True, may_launch=True)
 
 
 def extension_fingerprint():
@@ -468,6 +482,103 @@ def extension_fingerprint():
             digest.update(path.read_bytes())
             digest.update(b"\0")
     return digest.hexdigest()
+
+
+def directory_size(path):
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def cleanup():
+    """Undo what this plugin wrote outside its own directory.
+
+    Uninstalling a Herdr plugin unregisters it and removes its checkout, and
+    there is no hook to run on the way out, so everything this one puts
+    elsewhere has to be taken away on request: the two manifests that let
+    Chromium talk to Herdr, and the state directory.
+
+    The Chromium profile is reported rather than deleted. It holds the user's
+    own browsing — history, logins, whatever they left open — and no cleanup
+    command should decide that for them.
+    """
+    removed = []
+    for path in NATIVE_HOST_MANIFESTS or native_host_manifests():
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except OSError:
+            continue
+    if STATE_DIR.exists():
+        shutil.rmtree(STATE_DIR, ignore_errors=True)
+        removed.append(str(STATE_DIR))
+    return removed, PROFILE_DIR, directory_size(PROFILE_DIR) if PROFILE_DIR.exists() else 0
+
+
+def print_cleanup():
+    removed, profile, size = cleanup()
+    for path in removed:
+        print(f"removed {path}")
+    if not removed:
+        print("nothing to remove")
+    if size:
+        print(
+            f"\nYour Browsr browsing profile is left alone at {profile} "
+            f"({size / 1_000_000:.0f} MB).\nDelete it yourself if you want it gone: "
+            f"rm -rf {profile}"
+        )
+
+
+def health_step(state, now):
+    """Announce, once, that the browser has quietly stopped following Herdr.
+
+    Browser running and extension not answering is the failure that goes
+    unnoticed: nothing breaks visibly, the tab groups simply stop following the
+    workspace. A closed browser is not a fault, and a brief gap is not one
+    either, so this waits and then speaks exactly once per outage.
+    """
+    if not browser_alive() or bridge_alive():
+        return {"unwell_since": None, "announced": False}
+    state = state or {}
+    since = state.get("unwell_since")
+    if since is None:
+        since = now
+    announced = state.get("announced", False)
+    if not announced and now - since >= HEALTH_GRACE_SECONDS:
+        try:
+            herdr_call(
+                "notification", "show", "Browsr stopped following Herdr",
+                "--body",
+                "The browser is running but its extension is not answering, so "
+                "tab groups no longer follow the workspace. Restart it from the "
+                "Browsr panel.",
+                "--sound", "request",
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return {"unwell_since": since, "announced": False}
+        announced = True
+    return {"unwell_since": since, "announced": announced}
+
+
+def watch_health():
+    """Run by Herdr at startup; one per machine, not one per session."""
+    try:
+        handle = HEALTH_LOCK.open("w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return  # another Herdr session is already watching
+    state = None
+    while True:
+        try:
+            state = health_step(state, time.monotonic())
+        except Exception as error:
+            print(f"Browsr health watch failed: {error}", file=sys.stderr)
+        time.sleep(HEALTH_POLL_SECONDS)
 
 
 def browser_pids(proc_root=Path("/proc")):
@@ -607,9 +718,22 @@ def wait_for_bridge():
         time.sleep(0.1)
 
 
-def ensure_browser(wait=True, show=False, sync=False):
+def ensure_browser(wait=True, show=False, sync=False, may_launch=False):
+    """Make sure Browsr is usable, and start it only when that was asked for.
+
+    Browsr is a window on the user's screen, so it appears when they ask for it
+    and at no other time. Everything here other than the launch action — an
+    agent opening a page, a question about the tabs, the browser tooling that
+    starts with every agent session — used to start it, which meant the browser
+    turned up on its own whenever a session happened to begin.
+    """
     chromium = setup()
     if not bridge_alive():
+        if not may_launch and not browser_alive():
+            raise RuntimeError(
+                "Browsr is not running. Start it from Herdr with the "
+                "'Show or launch Browsr' action."
+            )
         with launch_lock():
             # Whoever held the lock may have finished the job already.
             if not bridge_alive():
@@ -764,18 +888,20 @@ def main():
         open_url(sys.argv[2])
         return
     if len(sys.argv) != 2 or sys.argv[1] not in {
-        "setup", "launch", "sync", "status", "panel", "hook", "open-link",
-        "workspace-tabs", "mcp-endpoint",
+        "setup", "launch", "sync", "status", "panel", "cleanup", "watch",
+        "hook", "open-link", "workspace-tabs", "mcp-endpoint",
     }:
         raise RuntimeError(
-            "Usage: bridge.py setup|launch|sync|status|panel|hook|open-link"
-            "|open-url URL|workspace-tabs|mcp-endpoint"
+            "Usage: bridge.py setup|launch|sync|status|panel|cleanup|watch"
+            "|hook|open-link|open-url URL|workspace-tabs|mcp-endpoint"
         )
     {
         "setup": setup,
         "sync": sync_workspaces,
         "status": print_status,
         "panel": toggle_panel,
+        "cleanup": print_cleanup,
+        "watch": watch_health,
         "launch": launch,
         "hook": hook,
         "open-link": open_link,

@@ -107,6 +107,27 @@ class PanelTests(unittest.TestCase):
         for key in ("[p]", "[s]", "[r]", "[k]", "[q]"):
             self.assertIn(key, text)
 
+    def test_a_failed_action_is_reported_not_fatal(self):
+        """The panel must survive the thing it exists to recover from.
+
+        Restarting raises when the browser comes up but the extension does not
+        answer — which is exactly when the panel is open — and the exception
+        took the whole pane down with it, leaving the user with neither a
+        browser nor the screen telling them why.
+        """
+        from unittest.mock import patch
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("Chromium started but the extension never answered")
+
+        for key, name in (("r", "ensure_browser"), ("s", "sync_workspaces"), ("p", "show_window")):
+            with patch.object(panel.bridge, name, explode), \
+                    patch.object(panel.bridge, "quit_browser", lambda: 1), \
+                    patch.object(panel.bridge, "browser_pids", list):
+                outcome = panel.act(key)
+            self.assertIsInstance(outcome, str, key)
+            self.assertIn("never answered", outcome, key)
+
     def test_escape_and_q_both_leave(self):
         self.assertIsNone(panel.act("q"))
         self.assertIsNone(panel.act("\x1b"))
