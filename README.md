@@ -9,14 +9,14 @@ on the right project when you look at it. Your own browser is left alone;
 Browsr drives a separate Chromium profile with its own history and logins.
 
 ```
- ┌ Browsr ──────────────────────────────────────────────────────────┐
- │ ▸ api   ▾ search          ▸ notes   ▸ infra   ▸ billing  │
- │              ├ localhost:5173                                     │
- │              └ Dashboard                                     │
- └───────────────────────────────────────────────────────────────────┘
-       ▲                  ▲
-       │                  └ the workspace you are in, open
-       └ the others, folded
+ ┌ Browsr ─────────────────────────────────────────────────────┐
+ │  ▸ api      ▾ search       ▸ notes    ▸ infra    ▸ billing  │
+ │             ├ localhost:5173                                 │
+ │             └ Dashboard                                      │
+ └──────────────────────────────────────────────────────────────┘
+      ▲          ▲
+      │          └ the workspace you are in, open
+      └ the others, folded
 ```
 
 There is also a panel inside Herdr that says what the browser is doing and lets
@@ -94,8 +94,8 @@ when it is open elsewhere, and closes it when you are already in it.
   Windows        1
 
   Strip matches Herdr (5)
-    api               1 tab
-    search                  2 tabs
+    api                    1 tab
+    search                 2 tabs
     notes                  1 tab
 
   [p] show browser  [s] match Herdr  [r] restart browser
