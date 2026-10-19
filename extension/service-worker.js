@@ -152,7 +152,13 @@ async function mergeUnownedGroups(canonical, title) {
 
 async function ensureGroup(sessionId, workspaceId, label) {
 	const key = workspaceKey(sessionId, workspaceId);
-	const title = normalizeLabel(label, workspaceId);
+	// Empty when the caller knows the workspace id but not its label, which is
+	// what `open_url` sends on purpose. Falling back to the id here gave that
+	// path a title — the raw id — and then used it to look up and merge groups
+	// by title, so a page opened before the labelled list arrived could leave a
+	// second group called `w14` beside the user's own. An untitled group is
+	// renamed by the next list, seconds later; a wrongly titled one is not.
+	const title = label ? normalizeLabel(label, workspaceId) : '';
 	// Migrate the short-lived 0.1.0 development state from workspace-only keys.
 	if (!groups.has(key) && groups.has(workspaceId)) {
 		groups.set(key, groups.get(workspaceId));
@@ -163,7 +169,7 @@ async function ensureGroup(sessionId, workspaceId, label) {
 		}
 	}
 	let group = await validGroup(key);
-	if (!group) group = await findUnownedGroupByTitle(title);
+	if (!group && title) group = await findUnownedGroupByTitle(title);
 	const isNew = !group;
 	if (!group) {
 		const win = await getManagedWindow();
@@ -172,14 +178,14 @@ async function ensureGroup(sessionId, workspaceId, label) {
 		group = await chrome.tabGroups.get(groupId);
 	}
 	groups.set(key, group.id);
-	await mergeUnownedGroups(group, title);
+	if (title) await mergeUnownedGroups(group, title);
 	// A caller that knows the workspace id but not its label must not rename the
 	// group: the user reads these titles off the strip.
-	const keepTitle = !label && group.title;
+	const keepTitle = !title;
 	// Collapsed only when this group is new. Collapsing on every refresh of the
 	// list closed whatever the user was looking at, and nothing reopened it,
 	// because from the outside the workspace in front had not changed.
-	const update = { title: keepTitle ? group.title : title };
+	const update = keepTitle ? {} : { title };
 	if (isNew) update.collapsed = true;
 	await chrome.tabGroups.update(group.id, update);
 	await saveState();

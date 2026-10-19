@@ -713,8 +713,13 @@ def extension_is_stale():
 def browser_status():
     """Everything the panel puts on screen, gathered without starting anything."""
     workspaces = herdr_workspaces() or []
+    # Asked once and reused. The panel refreshes every two seconds, and this
+    # ran two separate round-trips to the extension that could also disagree
+    # with each other — reporting the link as answering beside a strip it had
+    # just failed to read.
+    link = bridge_alive()
     strip = None
-    if bridge_alive():
+    if link:
         try:
             answer = socket_request({
                 "type": "status",
@@ -726,7 +731,7 @@ def browser_status():
             strip = None
     return {
         "browser": browser_alive(),
-        "bridge": bridge_alive(),
+        "bridge": link,
         "extension_stale": extension_is_stale(),
         "workspaces": [
             workspace.get("label") or workspace["workspace_id"]
@@ -890,60 +895,58 @@ def is_local_url(raw):
         return False
 
 
+def ask_extension(kind, workspace_id, failure, **extra):
+    """One question to the extension, about one workspace.
+
+    The three callers below had a copy of this each: the same id check, the
+    same ensure_browser, the same fresh request id and session id, the same
+    "did it say ok". Three copies is how one of them ends up with a different
+    timeout or a missing field.
+    """
+    if not workspace_id:
+        raise RuntimeError("No HERDR_WORKSPACE_ID; run this from inside a Herdr pane")
+    ensure_browser(show=False)
+    response = socket_request({
+        "type": kind,
+        "request_id": uuid.uuid4().hex,
+        "session_id": herdr_session_id(),
+        "workspace_id": workspace_id,
+        **extra,
+    }, timeout=10)
+    if not response.get("ok"):
+        raise RuntimeError(response.get("error", failure))
+    return response
+
+
 def open_link():
     context = json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
     url = context.get("clicked_url", "")
     if not is_local_url(url):
         raise RuntimeError("This handler only takes localhost addresses")
-    ensure_browser(show=False)
-    response = socket_request({
-        "type": "open_url",
-        "request_id": uuid.uuid4().hex,
-        "session_id": herdr_session_id(),
-        "workspace_id": context["workspace_id"],
-        "workspace_label": context.get("workspace_label") or context["workspace_id"],
-        "url": url,
-        "focus": True,
-    }, timeout=10)
-    if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Chromium did not open the address"))
+    ask_extension(
+        "open_url", context["workspace_id"], "Chromium did not open the address",
+        workspace_label=context.get("workspace_label") or context["workspace_id"],
+        url=url, focus=True,
+    )
 
 
 def open_url(raw_url):
     if not is_local_url(raw_url):
         raise RuntimeError("Browsr only automates localhost addresses")
-    workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
-    if not workspace_id:
-        raise RuntimeError("No HERDR_WORKSPACE_ID; run this from a Herdr pane")
-    ensure_browser(show=False)
-    response = socket_request({
-        "type": "open_url",
-        "request_id": uuid.uuid4().hex,
-        "session_id": herdr_session_id(),
-        "workspace_id": workspace_id,
-        # No label on purpose. This path runs from an agent's shell, which knows
-        # the workspace id but not what the user called it, and sending the id
-        # as the label renamed the group under them.
-        "url": raw_url,
-        "focus": False,
-    }, timeout=10)
-    if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Chromium did not open the address"))
+    # No label on purpose. This path runs from an agent's shell, which knows the
+    # workspace id but not what the user called it, and sending the id as the
+    # label renamed the group under them.
+    ask_extension(
+        "open_url", os.environ.get("HERDR_WORKSPACE_ID"),
+        "Chromium did not open the address", url=raw_url, focus=False,
+    )
 
 
 def workspace_tabs():
     workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
-    if not workspace_id:
-        raise RuntimeError("No HERDR_WORKSPACE_ID; run this from inside a Herdr pane")
-    ensure_browser(show=False)
-    response = socket_request({
-        "type": "workspace_tabs",
-        "request_id": uuid.uuid4().hex,
-        "session_id": herdr_session_id(),
-        "workspace_id": workspace_id,
-    }, timeout=10)
-    if not response.get("ok"):
-        raise RuntimeError(response.get("error", "Could not read the workspace tabs"))
+    response = ask_extension(
+        "workspace_tabs", workspace_id, "Could not read the workspace tabs",
+    )
     print(json.dumps(response.get("result") or {"workspace_id": workspace_id, "tabs": []}))
 
 

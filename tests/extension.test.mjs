@@ -219,3 +219,53 @@ test('group ids left over from a previous browser run are dropped, not carried',
 	assert.deepEqual(Object.values(stored.groups), harness.state.groups.map(group => group.id));
 	assert.ok(!Object.values(stored.lastActiveTabs).includes(6001), 'a dead tab id survived');
 });
+
+test('a page opened before the label arrives does not title the group with the id', async () => {
+	// `open_url` sends the workspace id and no label on purpose, so that an
+	// agent opening a page cannot rename the group the user reads off the
+	// strip. The id was still used as the title whenever the group had to be
+	// created — which is the case right after a service-worker restart, since
+	// the stored group ids do not survive one — leaving a group called `w1R`.
+	const harness = await boot({ windows: [1] });
+
+	await harness.deliver({
+		type: 'open_url',
+		session_id: SESSION,
+		workspace_id: 'w1R',
+		url: 'http://localhost:5173/',
+		focus: false,
+	});
+
+	assert.deepEqual(harness.strip().map(group => group.title), ['']);
+
+	// The labelled list lands a moment later and names it, without making a second one.
+	await harness.deliver(workspaceSet(SESSION, ['w1R', 'web']));
+
+	assert.deepEqual(harness.strip().map(group => group.title), ['web']);
+	assert.ok(harness.state.tabs.some(tab => tab.url === 'http://localhost:5173/'));
+});
+
+test('a page opened without a label does not swallow a group named after the id', async () => {
+	// The title lookup and the merge both ran on that fabricated title, so an
+	// unrelated group the user happened to name `w1R` was adopted and filled
+	// with the agent's tab.
+	const harness = await boot({
+		windows: [1],
+		tabs: [{ id: 70, windowId: 1, groupId: 700 }],
+		groups: [{ id: 700, windowId: 1, title: 'w1R' }],
+	});
+
+	await harness.deliver({
+		type: 'open_url',
+		session_id: SESSION,
+		workspace_id: 'w1R',
+		url: 'http://localhost:5173/',
+		focus: false,
+	});
+
+	const theirs = harness.state.groups.find(group => group.id === 700);
+	assert.equal(harness.state.tabs.filter(tab => tab.groupId === 700).length, 1,
+		"the user's own group was given the agent's tab");
+	assert.equal(theirs.title, 'w1R');
+	assert.equal(harness.strip().length, 2, 'no group of its own was made');
+});
