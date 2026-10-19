@@ -91,7 +91,7 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.subprocess, "Popen", fake_popen), \
                 patch.object(bridge, "show_window", lambda: None), \
                 patch.object(bridge, "sync_workspaces", lambda: None):
-            bridge.ensure_browser(wait=True, may_launch=True)
+            bridge.ensure_browser(may_launch=True)
 
         self.assertIn(f"--remote-debugging-port={bridge.DEVTOOLS_PORT}", launched["argv"])
         self.assertNotIn("--remote-debugging-port=0", launched["argv"])
@@ -482,6 +482,87 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue(profile.exists(), "the browsing profile was deleted")
             self.assertGreater(size, 2000)
 
+    def test_the_caller_decides_how_long_the_extension_may_take(self):
+        """The host applied a fixed eight seconds of its own, so the twenty
+        the full workspace set asks for were reported as a timeout while the
+        extension was still working — and then it finished the job anyway."""
+        spec = importlib.util.spec_from_file_location(
+            "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
+        )
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+
+        self.assertEqual(native_host.client_timeout({"timeout": 20}), 20)
+        self.assertEqual(native_host.client_timeout({}), 8)
+        for nonsense in ({"timeout": 0}, {"timeout": -1}, {"timeout": "soon"},
+                         {"timeout": None}, {"timeout": 10 ** 9}):
+            self.assertEqual(native_host.client_timeout(nonsense), 8, nonsense)
+
+    def test_a_request_carries_the_patience_its_caller_asked_for(self):
+        sent = []
+
+        class FakeSocket:
+            def settimeout(self, value):
+                sent.append(("settimeout", value))
+
+            def connect(self, _):
+                pass
+
+            def sendall(self, raw):
+                sent.append(("sent", json.loads(raw)))
+
+            def recv(self, _):
+                return b'{"ok": true}\n'
+
+            def close(self):
+                pass
+
+        with patch.object(bridge.socket, "socket", lambda *a: FakeSocket()):
+            bridge.socket_request({"type": "workspace_set"}, timeout=20)
+
+        self.assertEqual(sent[0], ("settimeout", 22))
+        self.assertEqual(sent[1][1]["timeout"], 20)
+
+    def test_setup_does_not_register_the_host_with_the_users_own_browser(self):
+        """Older versions wrote a second manifest into ~/.config/chromium.
+
+        Chromium looks for native hosts under the profile it was started with,
+        and Browsr always starts with its own, so that copy was never read by
+        Browsr — it only offered the host to the browser the user lives in,
+        the one the project promises not to touch.
+        """
+        with sandboxed_state() as root:
+            # Asserted on the list itself, not on what turns up under the
+            # sandbox: a stray write would land in the real home directory,
+            # outside the sandbox, where looking for it would find nothing
+            # and the test would pass for being blind.
+            self.assertEqual(
+                bridge.native_host_manifests(),
+                [bridge.PROFILE_DIR / "NativeMessagingHosts" / "dev.herdr.browser.json"],
+            )
+
+            with patch.object(bridge, "find_chromium", lambda: "/usr/bin/chromium"), \
+                    patch.object(bridge, "NATIVE_HOST_MANIFESTS", None):
+                bridge.setup()
+
+            self.assertEqual(
+                [p.relative_to(root) for p in root.rglob("dev.herdr.browser.json")],
+                [Path("profile/NativeMessagingHosts/dev.herdr.browser.json")],
+            )
+
+    def test_cleanup_still_removes_the_manifest_older_versions_left_behind(self):
+        with sandboxed_state() as root:
+            legacy = root / "config" / "NativeMessagingHosts" / "dev.herdr.browser.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text("{}")
+
+            with patch.object(bridge, "NATIVE_HOST_MANIFESTS", None), \
+                    patch.object(bridge, "LEGACY_HOST_MANIFEST", legacy):
+                removed, _, _ = bridge.cleanup()
+
+            self.assertFalse(legacy.exists(), "the old manifest was left behind")
+            self.assertIn(str(legacy), removed)
+
     def test_cleanup_is_quiet_when_there_is_nothing_to_remove(self):
         with sandboxed_state() as root:
             missing = [root / "nowhere" / "dev.herdr.browser.json"]
@@ -610,7 +691,7 @@ class BridgeTests(unittest.TestCase):
                 patch.object(bridge.subprocess, "Popen", lambda *a, **k: launched.append(a)), \
                 patch.object(bridge, "sync_workspaces", lambda: None):
             with self.assertRaises(RuntimeError):
-                bridge.ensure_browser(wait=True, may_launch=True)
+                bridge.ensure_browser(may_launch=True)
 
         self.assertEqual(launched, [])
 

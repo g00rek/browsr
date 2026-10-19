@@ -333,11 +333,6 @@ async function handleMessage(message) {
 			return;
 		case 'ping':
 			return;
-		case 'show': {
-			const win = await getManagedWindow();
-			await chrome.windows.update(win.id, { focused: true });
-			return;
-		}
 		case 'workspace_tabs':
 			return workspaceTabs(message);
 		case 'status':

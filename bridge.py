@@ -87,11 +87,17 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
+# Written by older versions into the user's ordinary Chromium as well. It was
+# never read there — Chromium looks for native hosts under the profile it was
+# started with, and Browsr always starts with its own — so all it did was offer
+# the host to the browser the user actually lives in. Still removed on cleanup.
+LEGACY_HOST_MANIFEST = (
+    Path.home() / ".config/chromium/NativeMessagingHosts" / f"{HOST_NAME}.json"
+)
+
+
 def native_host_manifests():
-    return [
-        PROFILE_DIR / "NativeMessagingHosts" / f"{HOST_NAME}.json",
-        Path.home() / ".config/chromium/NativeMessagingHosts" / f"{HOST_NAME}.json",
-    ]
+    return [PROFILE_DIR / "NativeMessagingHosts" / f"{HOST_NAME}.json"]
 
 
 NATIVE_HOST_MANIFESTS = None
@@ -164,10 +170,20 @@ def setup():
 
 
 def socket_request(message, timeout=2):
+    """Ask the extension something, through the native host.
+
+    The caller's patience travels with the message. The host used to apply a
+    fixed eight seconds of its own, so a caller that asked for longer — the
+    full workspace set waits twenty — was answered "the extension timed out"
+    while the extension was still working and went on to finish the job.
+    """
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(timeout)
+    # Above the host's own wait, so a slow extension is reported by the host,
+    # which knows why, rather than by this socket giving up first.
+    client.settimeout(timeout + 2)
     try:
         client.connect(str(SOCKET_PATH))
+        message = dict(message, timeout=timeout)
         client.sendall(json.dumps(message, separators=(",", ":")).encode() + b"\n")
         raw = b""
         while b"\n" not in raw:
@@ -264,14 +280,15 @@ def show_window():
             [hyprctl, "clients", "-j"], capture_output=True, text=True,
             timeout=3, check=True,
         )
-        expected_arg = f"--user-data-dir={PROFILE_DIR}"
+        # Matched by process, not by window class. The class is `chromium` for
+        # one browser and `google-chrome` for another, so a class test quietly
+        # excluded exactly the people the browser search was widened for — and
+        # browser_pids already knows precisely which processes are Browsr's,
+        # whole command-line fields rather than a substring of them.
+        ours = set(browser_pids())
         for client in json.loads(result.stdout):
             pid = int(client.get("pid", 0))
-            if client.get("class") != "chromium" or pid <= 0:
-                continue
-            command = (Path(f"/proc/{pid}/cmdline").read_bytes()
-                       .replace(b"\0", b" ").decode(errors="replace"))
-            if expected_arg not in command:
+            if pid not in ours:
                 continue
             address = str(client.get("address", ""))
             int(address, 16)
@@ -354,9 +371,6 @@ class HerdrLink:
         result = self.request("workspace.list")
         return (result or {}).get("workspaces") or []
 
-    def focused_workspace(self):
-        return next((item for item in self.workspaces() if item.get("focused")), None)
-
 
 def herdr_call(*argv):
     """Run the Herdr CLI and hand back its output."""
@@ -373,10 +387,6 @@ def plugin_context():
         return json.loads(os.environ["HERDR_PLUGIN_CONTEXT_JSON"])
     except (KeyError, ValueError, json.JSONDecodeError):
         return {}
-
-
-def current_workspace_id():
-    return os.environ.get("HERDR_WORKSPACE_ID") or plugin_context().get("workspace_id")
 
 
 def current_tab_id():
@@ -522,8 +532,8 @@ def sync_workspaces():
         return
 
 
-def launch(wait=True):
-    return ensure_browser(wait=wait, show=True, sync=True, may_launch=True)
+def launch():
+    return ensure_browser(show=True, sync=True, may_launch=True)
 
 
 def extension_fingerprint():
@@ -556,15 +566,19 @@ def cleanup():
 
     Uninstalling a Herdr plugin unregisters it and removes its checkout, and
     there is no hook to run on the way out, so everything this one puts
-    elsewhere has to be taken away on request: the two manifests that let
-    Chromium talk to Herdr, and the state directory.
+    elsewhere has to be taken away on request: the manifest that lets Chromium
+    talk to Herdr, the one older versions also wrote into the user's ordinary
+    Chromium, and the state directory.
 
     The Chromium profile is reported rather than deleted. It holds the user's
     own browsing — history, logins, whatever they left open — and no cleanup
     command should decide that for them.
     """
     removed = []
-    for path in NATIVE_HOST_MANIFESTS or native_host_manifests():
+    manifests = list(NATIVE_HOST_MANIFESTS or native_host_manifests())
+    if NATIVE_HOST_MANIFESTS is None:
+        manifests.append(LEGACY_HOST_MANIFEST)
+    for path in manifests:
         try:
             path.unlink()
             removed.append(str(path))
@@ -624,6 +638,12 @@ def health_step(state, now):
 def watch_health():
     """Run by Herdr at startup; one per machine, not one per session."""
     try:
+        # Without the mkdir this raises FileNotFoundError when the state
+        # directory is not there yet — the startup hook running before the
+        # build step, or after a cleanup — and the bare OSError below read
+        # that as "someone else is watching". The one thing that reports a
+        # silent failure then failed silently itself.
+        HEALTH_LOCK.parent.mkdir(parents=True, exist_ok=True)
         handle = HEALTH_LOCK.open("w")
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -774,7 +794,7 @@ def wait_for_bridge():
         time.sleep(0.1)
 
 
-def ensure_browser(wait=True, show=False, sync=False, may_launch=False):
+def ensure_browser(show=False, sync=False, may_launch=False):
     """Make sure Browsr is usable, and start it only when that was asked for.
 
     Browsr is a window on the user's screen, so it appears when they ask for it
@@ -806,8 +826,6 @@ def ensure_browser(wait=True, show=False, sync=False, may_launch=False):
                         )
                 else:
                     spawn_browser(chromium)
-                    if not wait:
-                        return
                     if not wait_for_bridge():
                         raise RuntimeError(
                             "Chromium started but the Herdr extension never reached the bridge"
@@ -877,7 +895,7 @@ def open_link():
     url = context.get("clicked_url", "")
     if not is_local_url(url):
         raise RuntimeError("This handler only takes localhost addresses")
-    ensure_browser(wait=True, show=False)
+    ensure_browser(show=False)
     response = socket_request({
         "type": "open_url",
         "request_id": uuid.uuid4().hex,
@@ -897,7 +915,7 @@ def open_url(raw_url):
     workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
     if not workspace_id:
         raise RuntimeError("No HERDR_WORKSPACE_ID; run this from a Herdr pane")
-    ensure_browser(wait=True, show=False)
+    ensure_browser(show=False)
     response = socket_request({
         "type": "open_url",
         "request_id": uuid.uuid4().hex,
@@ -916,8 +934,8 @@ def open_url(raw_url):
 def workspace_tabs():
     workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
     if not workspace_id:
-        raise RuntimeError("Brak HERDR_WORKSPACE_ID; uruchom polecenie z pane Herdr")
-    ensure_browser(wait=True, show=False)
+        raise RuntimeError("No HERDR_WORKSPACE_ID; run this from inside a Herdr pane")
+    ensure_browser(show=False)
     response = socket_request({
         "type": "workspace_tabs",
         "request_id": uuid.uuid4().hex,
@@ -930,7 +948,7 @@ def workspace_tabs():
 
 
 def devtools_endpoint():
-    ensure_browser(wait=True, show=False)
+    ensure_browser(show=False)
     if not devtools_alive(DEVTOOLS_PORT):
         raise RuntimeError(
             f"Browsr is not answering on port {DEVTOOLS_PORT}; see "

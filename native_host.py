@@ -155,6 +155,23 @@ def native_reader():
         stopping.set()
 
 
+# The longest any caller is allowed to hold a host thread. Well past the
+# twenty seconds the full workspace set asks for, and short enough that a
+# nonsense value cannot park a thread forever.
+MAX_CLIENT_TIMEOUT = 60
+
+
+def client_timeout(message):
+    """How long this caller said it was willing to wait, within reason."""
+    try:
+        asked = float(message.get("timeout", 8))
+    except (TypeError, ValueError):
+        return 8
+    if not 0 < asked <= MAX_CLIENT_TIMEOUT:
+        return 8
+    return asked
+
+
 def handle_client(connection):
     try:
         raw = b""
@@ -173,7 +190,7 @@ def handle_client(connection):
         write_native_message(message)
         if response_queue:
             try:
-                response = response_queue.get(timeout=8)
+                response = response_queue.get(timeout=client_timeout(message))
             except queue.Empty:
                 response = {"ok": False, "error": "Chromium extension timed out"}
             finally:

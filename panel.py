@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import re
 import select
 import shutil
 import sys
@@ -18,6 +19,7 @@ bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bridge)
 
 REFRESH_SECONDS = 2.0
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def tab_count(count):
@@ -124,7 +126,11 @@ def render(status, note="", width=80):
         lines.append(f"  {note}")
         lines.append("")
     lines.extend(key_lines(width))
-    return lines
+    # Scrubbed here, at the one place every line leaves: group titles and
+    # workspace labels are shown as they come back, and anything driving the
+    # browser can set a group title. An escape sequence in one would be obeyed
+    # by the terminal the panel is drawn in, not printed.
+    return [CONTROL_CHARACTERS.sub("", line) for line in lines]
 
 
 def draw(status, note=""):
@@ -140,7 +146,10 @@ def restart_browser():
     deadline = time.monotonic() + 10
     while bridge.browser_pids() and time.monotonic() < deadline:
         time.sleep(0.2)
-    bridge.ensure_browser(wait=True, show=True, sync=True)
+    # may_launch: the browser was just quit on purpose, so nothing is
+    # running and the guard in ensure_browser would otherwise refuse to
+    # start one — leaving this key with no browser to come back to.
+    bridge.ensure_browser(show=True, sync=True, may_launch=True)
 
 
 def act(key):

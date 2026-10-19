@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import os
 import unittest
@@ -127,6 +128,52 @@ class PanelTests(unittest.TestCase):
                 outcome = panel.act(key)
             self.assertIsInstance(outcome, str, key)
             self.assertIn("never answered", outcome, key)
+
+    def test_restart_can_actually_bring_the_browser_back(self):
+        """`[r]` is the key the panel itself points at for a stale extension,
+        and it quits the browser first. It asked ensure_browser to make the
+        browser usable without permission to start one, so after the quit the
+        guard refused and the key left the user with no browser at all — with
+        the refusal printed as a note, which reads like a failed restart
+        rather than a browser that is now gone.
+
+        The older test misses this because it patches ensure_browser out; this
+        one drives the real one and watches for the spawn.
+        """
+        from unittest.mock import patch
+
+        spawned = []
+        with patch.object(panel.bridge, "quit_browser", lambda: 1), \
+                patch.object(panel.bridge, "browser_pids", list), \
+                patch.object(panel.bridge, "setup", lambda: "/usr/bin/chromium"), \
+                patch.object(panel.bridge, "bridge_alive", lambda: False), \
+                patch.object(panel.bridge, "browser_alive", lambda: False), \
+                patch.object(panel.bridge, "launch_lock", contextlib.nullcontext), \
+                patch.object(panel.bridge, "spawn_browser", spawned.append), \
+                patch.object(panel.bridge, "wait_for_bridge", lambda: True), \
+                patch.object(panel.bridge, "show_window", lambda: True), \
+                patch.object(panel.bridge, "sync_workspaces", lambda: None):
+            outcome = panel.act("r")
+
+        self.assertEqual(spawned, ["/usr/bin/chromium"], outcome)
+        self.assertEqual(outcome, "Browsr restarted.")
+
+    def test_a_group_title_cannot_move_the_cursor_around_the_panel(self):
+        """Titles are shown as they come back from the browser, and anything
+        driving the browser can set one. An escape sequence in a title would
+        be executed by the terminal the panel is drawn in."""
+        status = dict(RUNNING, strip=dict(RUNNING["strip"], groups=[
+            {"title": "api\x1b[2J\x1b[31mwiped", "tabs": 1},
+            {"title": "search", "tabs": 1},
+        ]))
+        text = screen(status)
+        # The escape byte is what the terminal obeys; what is left of the
+        # sequence is then only text, and inventing a way to guess which
+        # leftovers to also delete would be guesswork.
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("\x07", screen(dict(RUNNING, strip=dict(
+            RUNNING["strip"], groups=[{"title": "api\x07\x00", "tabs": 1}]))))
+        self.assertIn("api", text)
 
     def test_escape_and_q_both_leave(self):
         self.assertIsNone(panel.act("q"))
