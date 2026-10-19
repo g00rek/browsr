@@ -33,11 +33,10 @@
   workspace's tabs and opens pages there without taking focus.
 
 <p align="center">
-  <img src="assets/tab-strip.png" alt="A browser tab strip: five coloured groups named api, tasteray, docs, infra and billing. The tasteray group is open and holds two tabs; the other four are folded into a single chip each." width="820" />
+  <img src="assets/herdr-to-browsr.png" alt="Herdr's space list on the left — api, tasteray, docs, infra, billing — with a coloured arrow from each space to the browser tab group of the same name below." width="900" />
 </p>
 
-One group per workspace, named after it. The one you are in is open; the rest
-are folded into a single chip each, and unfold when you switch to them.
+One group per workspace, named after it, kept in step as you work.
 
 ## Requirements
 
@@ -96,6 +95,13 @@ it.** An agent opening a page, a question about the tabs, the browser tooling
 that comes up with an agent session — all of them work when Browsr is running
 and politely decline when it is not. The browser is a window on your screen and
 it appears when you ask for it.
+
+<p align="center">
+  <img src="assets/tab-strip.png" alt="A browser tab strip: five coloured groups. The tasteray group is open and holds two tabs; the other four are folded into a single chip each." width="820" />
+</p>
+
+The workspace you are in is open; the rest are folded into a chip each, and
+unfold when you switch to them.
 
 From then on it keeps itself in step with Herdr: a new workspace gets a group, a
 renamed one is renamed, a closed one takes its group with it, and switching
