@@ -31,8 +31,8 @@
   workspace's tabs and opens pages there without taking focus.
 
 ```
- ┌ Browsr ─────────────────────────────────────────────────────┐
- │  ▸ api      ▾ search       ▸ notes    ▸ infra    ▸ billing  │
+ ┌ Browsr ──────────────────────────────────────────────────────┐
+ │  ▸ api      ▾ search       ▸ notes    ▸ infra    ▸ billing   │
  │             ├ localhost:5173                                 │
  │             └ Dashboard                                      │
  └──────────────────────────────────────────────────────────────┘
