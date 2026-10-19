@@ -33,7 +33,7 @@
   workspace's tabs and opens pages there without taking focus.
 
 <p align="center">
-  <img src="assets/tab-strip.png" alt="A browser tab strip: five coloured groups named api, search, notes, infra and billing. The search group is open and holds two tabs; the other four are folded into a single chip each." width="820" />
+  <img src="assets/tab-strip.png" alt="A browser tab strip: five coloured groups named api, tasteray, docs, infra and billing. The tasteray group is open and holds two tabs; the other four are folded into a single chip each." width="820" />
 </p>
 
 One group per workspace, named after it. The one you are in is open; the rest
