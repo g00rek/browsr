@@ -19,8 +19,24 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
-STATE_DIR = Path.home() / ".local/state/herdr-dev-browser"
-DATA_DIR = Path.home() / ".local/share/herdr-dev-browser"
+
+
+def _home_dir(kind):
+    """Where Browsr keeps its own files, under the name of the project.
+
+    The first versions called these directories herdr-dev-browser, a working
+    name from before the project had one, and that name is what the uninstall
+    message shows people. New installs get `browsr`; an install that already
+    has the old directory keeps it, because the other one holds the browser
+    profile — history and logins — and moving that to tidy up a name is a
+    trade nobody asked for.
+    """
+    legacy = Path.home() / ".local" / kind / "herdr-dev-browser"
+    return legacy if legacy.exists() else Path.home() / ".local" / kind / "browsr"
+
+
+STATE_DIR = _home_dir("state")
+DATA_DIR = _home_dir("share")
 PROFILE_DIR = DATA_DIR / "chromium"
 SOCKET_PATH = STATE_DIR / "control.sock"
 LAUNCH_LOCK = STATE_DIR / "launch.lock"

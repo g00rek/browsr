@@ -662,6 +662,38 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(codes, [0, 0, 0, 0])
             self.assertEqual(json.loads(target.read_text()), {"ok": True})
 
+    def test_a_fresh_install_names_its_directories_after_the_project(self):
+        """The first versions used a working name from before the project had
+        one, and that name is what the uninstall message shows people."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.object(bridge.Path, "home", staticmethod(lambda: home)):
+                self.assertEqual(bridge._home_dir("state"), home / ".local/state/browsr")
+                self.assertEqual(bridge._home_dir("share"), home / ".local/share/browsr")
+
+    def test_an_install_that_already_has_the_old_directory_keeps_it(self):
+        """It holds the browser profile — history and logins. Moving that to
+        tidy up a name is a trade nobody asked for."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / ".local/share/herdr-dev-browser").mkdir(parents=True)
+            with patch.object(bridge.Path, "home", staticmethod(lambda: home)):
+                self.assertEqual(
+                    bridge._home_dir("share"), home / ".local/share/herdr-dev-browser"
+                )
+
+    def test_the_native_host_looks_for_the_socket_where_the_bridge_puts_it(self):
+        """Both used to spell the path out separately, which is a way for them
+        to stop agreeing after one of them is edited."""
+        spec = importlib.util.spec_from_file_location(
+            "native_host", os.path.join(os.path.dirname(__file__), "..", "native_host.py")
+        )
+        native_host = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native_host)
+
+        self.assertEqual(native_host.SOCKET_PATH, bridge.SOCKET_PATH)
+        self.assertEqual(native_host.STATE_DIR, bridge.STATE_DIR)
+
     def test_the_browser_is_found_under_the_name_each_distribution_uses(self):
         """Only some distributions call it `chromium`.
 

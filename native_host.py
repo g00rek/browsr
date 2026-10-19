@@ -13,8 +13,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bridge  # noqa: E402  (same directory, and only for its Herdr helpers)
 
-STATE_DIR = Path.home() / ".local/state/herdr-dev-browser"
-SOCKET_PATH = STATE_DIR / "control.sock"
+# Taken from the bridge rather than spelled out again: the two have to agree
+# on where the socket is, and a second copy of the path is a way for them to
+# stop agreeing.
+STATE_DIR = bridge.STATE_DIR
+SOCKET_PATH = bridge.SOCKET_PATH
 MAX_MESSAGE = 1024 * 1024
 
 write_lock = threading.Lock()
