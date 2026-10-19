@@ -32,16 +32,12 @@
 - **Coding agents land in the right tab** — an agent in a pane sees that
   workspace's tabs and opens pages there without taking focus.
 
-```
- ┌ Browsr ──────────────────────────────────────────────────────┐
- │  ▸ api      ▾ search       ▸ notes    ▸ infra    ▸ billing   │
- │             ├ localhost:5173                                 │
- │             └ Dashboard                                      │
- └──────────────────────────────────────────────────────────────┘
-      ▲          ▲
-      │          └ the workspace you are in, open
-      └ the others, folded
-```
+<p align="center">
+  <img src="assets/tab-strip.png" alt="A browser tab strip: five coloured groups named api, search, notes, infra and billing. The search group is open and holds two tabs; the other four are folded into a single chip each." width="820" />
+</p>
+
+One group per workspace, named after it. The one you are in is open; the rest
+are folded into a single chip each, and unfold when you switch to them.
 
 ## Requirements
 
