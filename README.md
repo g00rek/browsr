@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/g00rek/browsr/releases/latest"><img src="https://img.shields.io/github/v/release/g00rek/browsr?label=release&labelColor=333333&color=666666" alt="latest release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-666666?labelColor=333333" alt="MIT license" /></a>
   <a href="https://github.com/g00rek/browsr/actions/workflows/check.yml"><img src="https://img.shields.io/github/actions/workflow/status/g00rek/browsr/check.yml?branch=main&label=checks&labelColor=333333&color=666666" alt="checks" /></a>
   <a href="https://herdr.dev/docs/plugins/"><img src="https://img.shields.io/badge/herdr-plugin-666666?labelColor=333333" alt="Herdr plugin" /></a>
