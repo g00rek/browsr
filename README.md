@@ -1,14 +1,34 @@
-<img src="assets/logo.png" alt="" width="104" align="right">
+<p align="center">
+  <img src="assets/logo.png" alt="Browsr" width="120" />
+</p>
 
-# Browsr
+<h1 align="center">Browsr</h1>
 
-A Herdr plugin that gives every workspace its own group of browser tabs, in a
-browser of its own.
+<p align="center">
+  <a href="#install">install</a> · <a href="#the-panel">panel</a> · <a href="#for-coding-agents">for coding agents</a> · <a href="#how-it-works">how it works</a> · <a href="https://herdr.dev">herdr.dev</a>
+</p>
 
-Switch project in Herdr and the browser follows: that project's tab group opens,
-the rest fold away. The browser never steals your focus — it is simply already
-on the right project when you look at it. Your own browser is left alone;
-Browsr drives a separate Chromium profile with its own history and logins.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-666666?labelColor=333333" alt="MIT license" /></a>
+  <a href="https://github.com/g00rek/browsr/actions/workflows/check.yml"><img src="https://img.shields.io/github/actions/workflow/status/g00rek/browsr/check.yml?branch=main&label=checks&labelColor=333333&color=666666" alt="checks" /></a>
+  <a href="https://herdr.dev/docs/plugins/"><img src="https://img.shields.io/badge/herdr-plugin-666666?labelColor=333333" alt="Herdr plugin" /></a>
+  <img src="https://img.shields.io/badge/platform-Linux-666666?labelColor=333333" alt="Linux" />
+</p>
+
+---
+
+**Every Herdr workspace gets its own group of browser tabs, in a browser of its own.**
+
+- **Switch project and the browser follows** — that workspace's group opens, the
+  rest fold away. Keyboard, mouse or command line, it keeps up.
+- **It never grabs your screen** — the window comes forward only when you ask
+  for it, and nothing but that key ever starts it.
+- **Your own browser is left alone** — Browsr drives a separate Chromium
+  profile, with its own history and logins.
+- **A panel inside Herdr** — what the browser is doing, and the keys that fix
+  it, without leaving the terminal.
+- **Coding agents land in the right tab** — an agent in a pane sees that
+  workspace's tabs and opens pages there without taking focus.
 
 ```
  ┌ Browsr ─────────────────────────────────────────────────────┐
@@ -20,9 +40,6 @@ Browsr drives a separate Chromium profile with its own history and logins.
       │          └ the workspace you are in, open
       └ the others, folded
 ```
-
-There is also a panel inside Herdr that says what the browser is doing and lets
-you act on it without leaving the terminal.
 
 ## Requirements
 
