@@ -195,15 +195,23 @@ export BROWSR_CHROMIUM=/path/to/your/browser
 
 ## Uninstall
 
+Run the cleanup action first, while the plugin is still installed and Herdr is
+running:
+
 ```bash
 herdr plugin action invoke cleanup --plugin g00rek.browsr
-herdr plugin unlink g00rek.browsr
 ```
 
-The cleanup action removes the two files that let Chromium talk to Herdr and the
-plugin's state directory. It does **not** delete the browser profile — that
-holds your history and logins — and prints where it is and how big, so you can
-decide.
+Then remove the plugin itself. Which command depends on how you installed it:
+
+```bash
+herdr plugin uninstall g00rek.browsr    # installed from GitHub
+herdr plugin unlink g00rek.browsr       # linked from a checkout
+```
+
+Cleanup removes the file that lets Chromium talk to Herdr and the plugin's
+state directory. It does **not** delete the browser profile — that holds your
+history and logins — and prints where it is and how big, so you can decide.
 
 ## How it works
 
