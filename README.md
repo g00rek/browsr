@@ -28,7 +28,7 @@ you act on it without leaving the terminal.
 
 - Linux
 - [Herdr](https://herdr.dev) 0.8.2 or newer
-- Chromium
+- Chromium, or Google Chrome
 - Python 3.9 or newer (CI runs 3.12)
 - Hyprland, for the one feature that raises the browser window. Everything else
   works on any window manager; that one key simply does nothing.
@@ -37,18 +37,15 @@ you act on it without leaving the terminal.
 ## Install
 
 ```bash
-git clone https://github.com/g00rek/browsr ~/projects/browsr
-herdr plugin link ~/projects/browsr
-~/projects/browsr/bridge.py setup
+herdr plugin install g00rek/browsr
 ```
 
-That last line checks Chromium is present and registers the small helper that
-lets the browser talk to Herdr. Installing from GitHub with `herdr plugin
-install` runs it for you; linking a local checkout does not, so run it once
-yourself. Either way it is harmless to repeat, and the plugin runs it again
-whenever it starts the browser.
+That is the whole installation. It also runs Browsr's setup step, which finds
+your browser and registers the small helper that lets the browser talk to
+Herdr. The step is harmless to repeat, and the plugin runs it again every time
+it starts the browser.
 
-Add two keys to `~/.config/herdr/config.toml`:
+Then add two keys to `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
@@ -65,6 +62,17 @@ description = "Browsr panel"
 ```
 
 Then `herdr server reload-config`.
+
+### From a checkout
+
+To work on Browsr itself, link the directory instead. Linking does **not** run
+the setup step, so run it once by hand:
+
+```bash
+git clone https://github.com/g00rek/browsr ~/projects/browsr
+herdr plugin link ~/projects/browsr
+~/projects/browsr/bridge.py setup
+```
 
 ## Using it
 
@@ -156,6 +164,15 @@ groups are found wherever they are — but close it; the panel will go back to 1
 
 **A group with no workspace, or the other way round.** Press `[s] match Herdr`.
 If it comes back, that is a bug worth reporting.
+
+**It says it cannot find a browser.** Setup looks for `chromium`,
+`chromium-browser`, `chromium-freeworld`, `ungoogled-chromium`,
+`google-chrome-stable`, `google-chrome` and `chrome`, in that order. If yours
+is named or installed differently, point at it:
+
+```bash
+export BROWSR_CHROMIUM=/path/to/your/browser
+```
 
 ## Uninstall
 

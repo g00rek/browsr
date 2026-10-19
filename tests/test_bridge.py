@@ -662,6 +662,62 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(codes, [0, 0, 0, 0])
             self.assertEqual(json.loads(target.read_text()), {"ok": True})
 
+    def test_the_browser_is_found_under_the_name_each_distribution_uses(self):
+        """Only some distributions call it `chromium`.
+
+        The first version looked for that one name — the one this machine
+        uses. On Debian and Ubuntu the same browser is `chromium-browser`, so
+        those users were told to install a browser they already had, by the
+        first command the README hands them.
+        """
+        for name in ("chromium", "chromium-browser", "google-chrome-stable", "chrome"):
+            with patch.dict(os.environ), \
+                    patch("shutil.which", lambda asked, want=name: f"/usr/bin/{asked}" if asked == want else None):
+                os.environ.pop("BROWSR_CHROMIUM", None)
+                self.assertEqual(bridge.find_chromium(), f"/usr/bin/{name}", name)
+
+    def test_a_browser_in_an_unguessable_place_can_be_pointed_at(self):
+        with patch.dict(os.environ, {"BROWSR_CHROMIUM": "/opt/odd/browser"}), \
+                patch("shutil.which", lambda asked: asked if asked == "/opt/odd/browser" else None):
+            self.assertEqual(bridge.find_chromium(), "/opt/odd/browser")
+
+    def test_no_browser_at_all_says_which_names_were_tried(self):
+        """The message is the whole fix for someone whose binary is named
+        differently again, so it has to carry the list and the way out."""
+        with patch.dict(os.environ), patch("shutil.which", lambda asked: None):
+            os.environ.pop("BROWSR_CHROMIUM", None)
+            self.assertIsNone(bridge.find_chromium())
+            with self.assertRaises(RuntimeError) as caught:
+                bridge.setup()
+
+        message = str(caught.exception)
+        self.assertIn("chromium-browser", message)
+        self.assertIn("BROWSR_CHROMIUM", message)
+
+    def test_the_search_really_walks_PATH(self):
+        """The other three tests fake the lookup, so none of them proves the
+        real one works. This drives it: a real executable, a real PATH, no
+        patching of the thing under test."""
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / "chromium-browser"
+            fake.write_text("#!/bin/sh\nexit 0\n")
+            fake.chmod(0o755)
+
+            with patch.dict(os.environ, {"PATH": directory}):
+                os.environ.pop("BROWSR_CHROMIUM", None)
+                self.assertEqual(bridge.find_chromium(), str(fake))
+
+                os.environ["BROWSR_CHROMIUM"] = str(fake)
+                self.assertEqual(bridge.find_chromium(), str(fake))
+
+    def test_a_wrong_override_is_not_reported_as_a_missing_browser(self):
+        with patch.dict(os.environ, {"BROWSR_CHROMIUM": "/opt/typo"}), \
+                patch("shutil.which", lambda asked: None):
+            with self.assertRaises(RuntimeError) as caught:
+                bridge.setup()
+
+        self.assertIn("/opt/typo", str(caught.exception))
+
     def test_an_edited_extension_is_not_run_from_the_profile_cache(self):
         """Chromium keeps its own compiled copy of the service worker.
 

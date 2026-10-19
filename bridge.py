@@ -81,12 +81,52 @@ def native_host_manifests():
 NATIVE_HOST_MANIFESTS = None
 
 
+# Every distribution names the same browser differently, and this machine
+# happens to use the one name the first version looked for. A user on Debian or
+# Ubuntu, where it is chromium-browser, was told to install a browser they
+# already had — on the very first command the README gives them. No test can
+# catch that, because the tests run where the name matches.
+CHROMIUM_NAMES = (
+    "chromium",
+    "chromium-browser",
+    "chromium-freeworld",
+    "ungoogled-chromium",
+    "google-chrome-stable",
+    "google-chrome",
+    "chrome",
+)
+
+
+def find_chromium():
+    """Path to the Chromium-family browser to drive, or None when there is none.
+
+    BROWSR_CHROMIUM wins and may be a bare name or a path, so a build that no
+    list would guess stays usable without editing this one.
+    """
+    override = os.environ.get("BROWSR_CHROMIUM")
+    if override:
+        return shutil.which(override)
+    for name in CHROMIUM_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
 def setup():
-    chromium = shutil.which("chromium")
+    chromium = find_chromium()
     if not chromium:
+        override = os.environ.get("BROWSR_CHROMIUM")
+        if override:
+            raise RuntimeError(
+                f"BROWSR_CHROMIUM points at {override!r}, which is not an "
+                "executable on this machine."
+            )
         raise RuntimeError(
-            "Chromium is not on PATH. Browsr drives its own Chromium profile; "
-            "install chromium and run this again."
+            "No Chromium-family browser on PATH. Browsr drives a Chromium "
+            "profile of its own; install one of "
+            + ", ".join(CHROMIUM_NAMES)
+            + " — or set BROWSR_CHROMIUM to the binary — and run this again."
         )
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
