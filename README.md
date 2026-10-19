@@ -14,6 +14,7 @@
   <a href="https://github.com/g00rek/browsr/actions/workflows/check.yml"><img src="https://img.shields.io/github/actions/workflow/status/g00rek/browsr/check.yml?branch=main&label=checks&labelColor=333333&color=666666" alt="checks" /></a>
   <a href="https://herdr.dev/docs/plugins/"><img src="https://img.shields.io/badge/herdr-plugin-666666?labelColor=333333" alt="Herdr plugin" /></a>
   <img src="https://img.shields.io/badge/platform-Linux-666666?labelColor=333333" alt="Linux" />
+  <a href="https://x.com/michalgoreckipl"><img src="https://img.shields.io/badge/follow-%40michalgoreckipl-000000?logo=x&logoColor=white" alt="follow @michalgoreckipl on X" /></a>
 </p>
 
 ---
