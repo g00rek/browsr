@@ -31,6 +31,12 @@ Then repeat `workspace-tabs` and `list_pages`. Do not use `new_page` for a
 localhost page because it creates an ungrouped tab. Popups opened by an existing
 workspace page may be used after confirming they appear in `workspace-tabs`.
 
+The MCP connection goes through a filter that keeps agents from taking focus:
+`select_page` with `bringToFront` does nothing visible, `new_page` always opens
+in the background, and `new_page` with `isolatedContext` is refused with an error
+(separate logins and contexts are not available to agents in Browsr). Do not retry
+a refused call; work in this workspace's tabs.
+
 Several Claude sessions may share Browsr concurrently. A tab selected for this
 workspace remains this session's target even if the user focuses another Herdr
 workspace. Re-resolve the page only if it closes or the MCP reconnects.

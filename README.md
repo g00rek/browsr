@@ -163,6 +163,13 @@ Browsr instead of launching a browser of its own:
 claude mcp add --scope user chrome-devtools ~/projects/browsr/browsr-chrome-mcp.py
 ```
 
+The wrapper does not hand the browser to the MCP server directly. It puts a small
+filter in between, so that nothing an agent does can raise the window or open a
+separate one on top of your typing: commands that bring a tab to the front are
+answered without being sent, new tabs always open in the background, and
+isolated browser contexts (which would open a new window) are refused. Agents
+work in the tabs of this profile, in their workspace's group.
+
 `skills/browsr/SKILL.md` tells an agent how to pick the right tab. Copy it to
 `~/.claude/skills/browsr/SKILL.md` and replace `<browsr>` with the directory you
 cloned into.
