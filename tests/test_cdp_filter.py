@@ -2,10 +2,16 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import socket
+import stat
+import subprocess
 import sys
+import tempfile
+import time
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -216,6 +222,108 @@ class ProxyEndToEndTests(unittest.TestCase):
         _, echoed = next(peer.messages())
         self.assertEqual(echoed, big)
         self.assertEqual(self.chromium.received[-1], big)
+
+
+class BrowserStartsLateTests(unittest.TestCase):
+    """The proxy outlives the browser: down means 503, up again means working."""
+
+    def setUp(self):
+        self.up = None
+
+        def resolve():
+            if not self.up:
+                raise cdp_filter.BrowserDown("Browsr is not running. Start it from Herdr.")
+            return self.up.url
+
+        self.opened = []
+        self.server, self.proxy = cdp_filter.start_proxy(resolve, open_tab=self.opened.append)
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+
+    def get(self, path):
+        try:
+            with urllib.request.urlopen(self.proxy + path) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, error.read()
+            finally:
+                error.close()
+
+    def test_down_gives_503_with_the_reason_then_recovers(self):
+        status, body = self.get("/json/version")
+        self.assertEqual(status, 503)
+        self.assertIn(b"Browsr is not running", body)
+
+        port = self.server.server_port
+        sock = socket.create_connection(("127.0.0.1", port))
+        sock.sendall(b"GET /devtools/browser/abc HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+                     b"Connection: Upgrade\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n"
+                     b"Sec-WebSocket-Version: 13\r\n\r\n")
+        self.assertTrue(sock.recv(4096).startswith(b"HTTP/1.1 503"))
+        sock.close()
+
+        self.up = FakeChromium()
+        self.addCleanup(self.up.close)
+        status, body = self.get("/json/version")
+        self.assertEqual(status, 200)
+        peer = connect(json.loads(body)["webSocketDebuggerUrl"])
+        self.addCleanup(peer.close)
+        peer.send(cdp_filter.OP_TEXT, b'{"id":1,"method":"Browser.getVersion"}')
+        self.assertEqual(json.loads(next(peer.messages())[1])["id"], 1)
+
+    def test_a_browser_that_moves_is_found_again(self):
+        first = FakeChromium()
+        self.up = first
+        self.assertEqual(self.get("/json/version")[0], 200)
+        first.close()
+        self.up = FakeChromium()
+        self.addCleanup(self.up.close)
+        # The cached address is dead; the failed connection makes it re-resolve.
+        self.assertEqual(self.get("/json/version")[0], 200)
+
+    def test_opening_a_tab_while_down_is_a_clear_error(self):
+        def refuse(url):
+            raise RuntimeError("Browsr is not running. Start it from Herdr.")
+
+        self.server.open_tab = refuse
+        # Through the real seam: bridge.py open-tab with Browsr down must fail
+        # loudly rather than hang; here we check the proxy turns it into an error.
+        events = []
+        message = {"id": 9, "method": "Target.createTarget", "params": {"url": "about:blank"}}
+
+        class Sink:
+            def send(self, opcode, payload):
+                events.append(json.loads(payload))
+
+        handler = cdp_filter._Handler.__new__(cdp_filter._Handler)
+        handler.server = self.server
+        handler._create_tab(Sink(), message)
+        self.assertEqual(events[0]["id"], 9)
+        self.assertIn("Browsr is not running", events[0]["error"]["message"])
+
+
+class WrapperTests(unittest.TestCase):
+    def test_wrapper_starts_its_child_even_though_the_browser_is_down(self):
+        root = os.path.join(os.path.dirname(__file__), "..")
+        with tempfile.TemporaryDirectory() as home:
+            npx = os.path.join(home, "npx")
+            record = os.path.join(home, "args")
+            with open(npx, "w") as handle:
+                handle.write(f'#!/bin/sh\necho "$@" > {record}\nexec sleep 30\n')
+            os.chmod(npx, os.stat(npx).st_mode | stat.S_IEXEC)
+            env = {"PATH": home + ":" + os.environ["PATH"], "HOME": home, "HERDR_WORKSPACE_ID": "w1"}
+            wrapper = subprocess.Popen([sys.executable, os.path.join(root, "browsr-chrome-mcp.py")], env=env)
+            try:
+                for _ in range(100):
+                    if os.path.exists(record) and os.path.getsize(record):
+                        break
+                    time.sleep(0.05)
+                self.assertIsNone(wrapper.poll(), "the wrapper exited instead of waiting for the browser")
+                self.assertIn("--browser-url=http://127.0.0.1:", open(record).read())
+            finally:
+                wrapper.send_signal(signal.SIGTERM)
+                wrapper.wait(timeout=10)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ RFC 6455 WebSocket for both sides.
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import socket
@@ -51,6 +52,59 @@ REFUSED_CONTEXT = (
 # Commands that exist only to raise a window. Answering them with an empty
 # result keeps the MCP server happy (it waits for a reply) and changes nothing.
 SWALLOWED = {"Page.bringToFront", "Target.activateTarget"}
+
+
+# ------------------------------------------------------ finding the browser
+
+class BrowserDown(Exception):
+    """Browsr is not running (or not answering) right now."""
+
+
+class Endpoint:
+    """Where the real DevTools endpoint is, asked for lazily.
+
+    The proxy has to outlive the browser: an agent session that starts while
+    Browsr is down, or while it restarts, must not be left without its browser
+    tool for good (Claude Code never retries a server that failed to start).
+    So nothing is resolved at start. Every request asks here; a successful
+    answer is kept for a few seconds, and dropped as soon as a connection to it
+    fails, so that a restarted browser on a new address is found at once.
+    """
+
+    def __init__(self, resolve, ttl=5.0):
+        self._resolve = resolve
+        self._ttl = ttl
+        self._cached = None
+        self._at = 0.0
+        self._lock = threading.Lock()
+
+    def get(self):
+        with self._lock:
+            if self._cached and time.monotonic() - self._at < self._ttl:
+                return self._cached
+            try:
+                raw = self._resolve()
+            except BrowserDown:
+                self._cached = None
+                raise
+            except Exception as error:
+                self._cached = None
+                raise BrowserDown(str(error)) from error
+            parts = urlsplit(raw)
+            self._cached, self._at = (parts.hostname, parts.port), time.monotonic()
+            return self._cached
+
+    def invalidate(self):
+        with self._lock:
+            self._cached = None
+
+
+def resolve_with_bridge():
+    """The default resolver: the same logic `bridge.py mcp-endpoint` runs."""
+    spec = importlib.util.spec_from_file_location("browsr_bridge", BRIDGE)
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    return bridge.devtools_url()
 
 
 # ---------------------------------------------------------------- the filter
@@ -253,11 +307,25 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(path)
         self.send_error(404)
 
+    def _unavailable(self, message):
+        # 503 with the reason in plain text: the MCP server shows it to the agent
+        # as its connection error, and retries on the next tool call.
+        body = message.encode()
+        self.send_response(503)
+        self.send_header("Content-Type", "text/plain; charset=UTF-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
     def _json(self, path):
-        real = self.server.real
         try:
-            with urllib.request.urlopen(f"http://{real[0]}:{real[1]}{path}", timeout=10) as response:
-                payload = json.loads(response.read())
+            real, payload = self.server.endpoint_call(
+                lambda real: json.loads(_fetch(real, path))
+            )
+        except BrowserDown as down:
+            return self._unavailable(str(down))
         except (OSError, ValueError):
             return self.send_error(502)
         body = json.dumps(_rewrite(payload, f"{real[0]}:{real[1]}", f"127.0.0.1:{self.server.server_port}")).encode()
@@ -269,9 +337,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _websocket(self, path):
         key = self.headers.get("Sec-WebSocket-Key", "")
-        real = self.server.real
         try:
-            upstream_sock = _connect_upstream(real[0], real[1], path)
+            _, upstream_sock = self.server.endpoint_call(
+                lambda real: _connect_upstream(real[0], real[1], path)
+            )
+        except BrowserDown as down:
+            return self._unavailable(str(down))
         except OSError:
             return self.send_error(502)
         accept = base64.b64encode(hashlib.sha1(key.encode() + WS_GUID).digest()).decode()
@@ -322,12 +393,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 
     def _create_tab(self, client, message):
-        real = self.server.real
         nonce = os.urandom(6).hex()
         url = f"about:blank#browsr-{nonce}"
         try:
             self.server.open_tab(url)
-            target_id = _find_target(real, url, timeout=10)
+            target_id = _find_target(self.server, url, timeout=10)
             body = {"result": {"targetId": target_id}}
         except Exception as error:  # a refusal here must reach the agent, not kill the pump
             body = {"error": {"code": -32000, "message": f"Browsr could not open a background tab: {error}"}}
@@ -337,15 +407,20 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
 
-def _find_target(real, url, timeout):
+def _fetch(real, path):
+    with urllib.request.urlopen(f"http://{real[0]}:{real[1]}{path}", timeout=10) as response:
+        return response.read()
+
+
+def _find_target(server, url, timeout):
     """Poll the browser's own target list until the tab we just made appears."""
     deadline = time.monotonic() + timeout
     while True:
         try:
-            with urllib.request.urlopen(f"http://{real[0]}:{real[1]}/json/list", timeout=5) as response:
-                for target in json.loads(response.read()):
-                    if target.get("url") == url and target.get("type") == "page":
-                        return target["id"]
+            _, listing = server.endpoint_call(lambda real: json.loads(_fetch(real, "/json/list")))
+            for target in listing:
+                if target.get("url") == url and target.get("type") == "page":
+                    return target["id"]
         except (OSError, ValueError):
             pass
         if time.monotonic() >= deadline:
@@ -382,16 +457,34 @@ def _rewrite(value, real_netloc, proxy_netloc):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
+    def endpoint_call(self, action):
+        """Run action(real) against the current endpoint; returns (real, result).
+
+        One retry after dropping the cached address, because a failed connection
+        is how a restarted browser on a new address shows itself.
+        """
+        for attempt in (0, 1):
+            real = self.endpoint.get()
+            try:
+                return real, action(real)
+            except OSError:
+                self.endpoint.invalidate()
+                if attempt:
+                    raise
+
 
 def start_proxy(real_endpoint, open_tab=open_tab_with_bridge):
-    """Start the proxy against http://127.0.0.1:PORT; returns (server, proxy_url).
+    """Start the proxy; returns (server, proxy_url).
+
+    real_endpoint is either http://127.0.0.1:PORT or a callable returning one
+    (raising when the browser is down), asked afresh as requests come in.
 
     The threads are daemons: the proxy lives and dies with the process that
     started it.
     """
-    parts = urlsplit(real_endpoint)
+    resolve = real_endpoint if callable(real_endpoint) else (lambda: real_endpoint)
     server = _Server(("127.0.0.1", 0), _Handler)
-    server.real = (parts.hostname, parts.port)
+    server.endpoint = Endpoint(resolve)
     server.open_tab = open_tab
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}"

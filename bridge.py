@@ -969,14 +969,24 @@ def workspace_tabs():
     print(json.dumps(response.get("result") or {"workspace_id": workspace_id, "tabs": []}))
 
 
-def devtools_endpoint():
+def devtools_url():
+    """The DevTools address of the running Browsr, or RuntimeError saying why not.
+
+    Never launches the browser. The DevTools proxy asks this on every request
+    rather than once at start, so that an agent session that begins while
+    Browsr is down still gets its browser tool as soon as Browsr is up.
+    """
     ensure_browser(show=False)
     if not devtools_alive(DEVTOOLS_PORT):
         raise RuntimeError(
             f"Browsr is not answering on port {DEVTOOLS_PORT}; see "
             f"{STATE_DIR / 'chromium.log'}"
         )
-    print(f"http://127.0.0.1:{DEVTOOLS_PORT}")
+    return f"http://127.0.0.1:{DEVTOOLS_PORT}"
+
+
+def devtools_endpoint():
+    print(devtools_url())
 
 
 def main():
