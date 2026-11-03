@@ -269,3 +269,48 @@ test('a page opened without a label does not swallow a group named after the id'
 	assert.equal(theirs.title, 'w1R');
 	assert.equal(harness.strip().length, 2, 'no group of its own was made');
 });
+
+test('open_tab makes a background tab in the workspace group and never touches the window', async () => {
+	const harness = await boot({ windows: [1] });
+	await harness.deliver(created('w1R', 'web'));
+	const windowUpdates = [];
+	const originalUpdate = harness.chrome.windows.update;
+	harness.chrome.windows.update = async (...args) => {
+		windowUpdates.push(args);
+		return originalUpdate(...args);
+	};
+	const activations = [];
+	const originalTabUpdate = harness.chrome.tabs.update;
+	harness.chrome.tabs.update = async (...args) => {
+		activations.push(args);
+		return originalTabUpdate(...args);
+	};
+
+	const reply = await harness.deliver({
+		type: 'open_tab',
+		session_id: SESSION,
+		workspace_id: 'w1R',
+		url: 'about:blank#browsr-abc',
+	});
+
+	assert.equal(reply.ok, true);
+	const tab = harness.state.tabs.find(item => item.url === 'about:blank#browsr-abc');
+	assert.ok(tab, 'the tab was created');
+	assert.equal(tab.active, false);
+	const group = harness.state.groups.find(item => item.title === 'web');
+	assert.equal(tab.groupId, group.id);
+	assert.equal(reply.result.tab_id, tab.id);
+	assert.deepEqual(windowUpdates, []);
+	assert.deepEqual(activations, []);
+	assert.equal(harness.state.windows.length, 1);
+});
+
+test('open_tab refuses addresses that are not web pages', async () => {
+	const harness = await boot({ windows: [1] });
+	await harness.deliver(created('w1R', 'web'));
+	for (const url of ['chrome://settings', 'file:///etc/passwd', 'javascript:alert(1)']) {
+		const reply = await harness.deliver({ type: 'open_tab', session_id: SESSION, workspace_id: 'w1R', url });
+		assert.equal(reply.ok, false, url);
+	}
+	assert.equal(harness.state.tabs.filter(tab => tab.url.startsWith('file:')).length, 0);
+});

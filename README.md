@@ -166,7 +166,9 @@ claude mcp add --scope user chrome-devtools ~/projects/browsr/browsr-chrome-mcp.
 The wrapper does not hand the browser to the MCP server directly. It puts a small
 filter in between, so that nothing an agent does can raise the window or open a
 separate one on top of your typing: commands that bring a tab to the front are
-answered without being sent, new tabs always open in the background, and
+answered without being sent, new tabs are made by Browsr's own extension, in the background and in
+the workspace's group (a tab created over DevTools raises the window even when
+asked not to), and
 isolated browser contexts (which would open a new window) are refused. Agents
 work in the tabs of this profile, in their workspace's group.
 

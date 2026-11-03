@@ -641,6 +641,7 @@ class BridgeTests(unittest.TestCase):
         """
         for command, arguments in (
             (bridge.open_url, ("http://localhost:3000/",)),
+            (bridge.open_tab, ("about:blank#x",)),
             (bridge.workspace_tabs, ()),
             (bridge.devtools_endpoint, ()),
             (bridge.open_link, ()),

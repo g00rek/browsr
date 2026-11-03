@@ -942,6 +942,25 @@ def open_url(raw_url):
     )
 
 
+def open_tab(raw_url):
+    """Open a background tab in this workspace's group; print its description.
+
+    Unlike open-url this takes any web address, because it is the way the
+    DevTools proxy creates the tabs an agent asks for. It never focuses.
+    """
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        parsed = None
+    if not parsed or not (parsed.scheme.lower() in {"http", "https"} or raw_url.startswith("about:blank")):
+        raise RuntimeError("Browsr opens only http(s) addresses and about:blank")
+    response = ask_extension(
+        "open_tab", os.environ.get("HERDR_WORKSPACE_ID"),
+        "Chromium did not open the tab", url=raw_url,
+    )
+    print(json.dumps(response.get("result") or {}))
+
+
 def workspace_tabs():
     workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
     response = ask_extension(
@@ -964,13 +983,16 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "open-url":
         open_url(sys.argv[2])
         return
+    if len(sys.argv) == 3 and sys.argv[1] == "open-tab":
+        open_tab(sys.argv[2])
+        return
     if len(sys.argv) != 2 or sys.argv[1] not in {
         "setup", "launch", "sync", "status", "panel", "cleanup", "watch",
         "hook", "open-link", "workspace-tabs", "mcp-endpoint",
     }:
         raise RuntimeError(
             "Usage: bridge.py setup|launch|sync|status|panel|cleanup|watch"
-            "|hook|open-link|open-url URL|workspace-tabs|mcp-endpoint"
+            "|hook|open-link|open-url URL|open-tab URL|workspace-tabs|mcp-endpoint"
         )
     {
         "setup": setup,

@@ -33,7 +33,7 @@ workspace page may be used after confirming they appear in `workspace-tabs`.
 
 The MCP connection goes through a filter that keeps agents from taking focus:
 `select_page` with `bringToFront` does nothing visible, `new_page` always opens
-in the background, and `new_page` with `isolatedContext` is refused with an error
+in the background (it is created by Browsr in this workspace's group, as about:blank), and `new_page` with `isolatedContext` is refused with an error
 (separate logins and contexts are not available to agents in Browsr). Do not retry
 a refused call; work in this workspace's tabs.
 

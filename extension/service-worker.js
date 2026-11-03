@@ -277,6 +277,32 @@ async function openLocalUrl(message) {
 	await saveState();
 }
 
+// What may be opened by `open_tab`: web pages and about:blank. Never chrome://,
+// file:// or javascript:, which would turn an agent's "open a tab" into a way
+// to reach the browser's own pages or run script with no page to confine it.
+function isOpenableUrl(raw) {
+	try {
+		const url = new URL(raw);
+		return url.protocol === 'http:' || url.protocol === 'https:' || raw.startsWith('about:blank');
+	} catch {
+		return false;
+	}
+}
+
+// A new tab for an agent, in the background, in the workspace's group. This
+// exists because a tab created over DevTools (Target.createTarget) raises the
+// browser window even when asked for a background tab, which steals the user's
+// focus. chrome.tabs.create with active:false does not touch the window: no
+// windows.update, no tab activation, no expanding of a collapsed group.
+async function openTab(message) {
+	if (!isOpenableUrl(message.url)) throw new Error('Only http(s) and about:blank tabs can be opened');
+	const group = await ensureGroup(message.session_id, message.workspace_id, message.workspace_label);
+	const win = await getManagedWindow();
+	const tab = await chrome.tabs.create({ windowId: win.id, url: message.url, active: false });
+	await chrome.tabs.group({ groupId: group.id, tabIds: [tab.id] });
+	return { tab_id: tab.id, url: message.url };
+}
+
 async function workspaceTabs(message) {
 	const key = workspaceKey(message.session_id, message.workspace_id);
 	const group = await validGroup(key);
@@ -337,6 +363,8 @@ async function handleMessage(message) {
 		case 'open_url':
 			await openLocalUrl(message);
 			return;
+		case 'open_tab':
+			return openTab(message);
 		case 'ping':
 			return;
 		case 'workspace_tabs':

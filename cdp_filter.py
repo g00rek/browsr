@@ -30,10 +30,15 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlsplit
+
+BRIDGE = Path(__file__).resolve().parent / "bridge.py"
 
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
@@ -53,9 +58,10 @@ SWALLOWED = {"Page.bringToFront", "Target.activateTarget"}
 def filter_message(data):
     """Decide what to do with one message sent by the MCP server.
 
-    Returns ("forward", bytes) to send to Chromium or ("reply", bytes) to send
-    straight back to the MCP server. Untouched messages come back as the very
-    bytes that went in.
+    Returns ("forward", bytes) to send to Chromium, ("reply", bytes) to send
+    straight back to the MCP server, or ("open_tab", message) when the tab has
+    to be created through Browsr's extension instead. Untouched messages come
+    back as the very bytes that went in.
     """
     try:
         message = json.loads(data)
@@ -75,11 +81,18 @@ def filter_message(data):
     if method == "Target.createTarget":
         if params.get("browserContextId"):
             return "reply", _reply(message, _refusal())
-        # Background tab in the existing window: no raise, no new window.
-        params["background"] = True
-        params.pop("newWindow", None)
-        message["params"] = params
-        return "forward", json.dumps(message, separators=(",", ":")).encode()
+        # Not forwarded at all. Measured on the real window: even with
+        # background:true, a tab created over DevTools raises the browser window
+        # and takes the user's focus. The extension makes the tab instead
+        # (chrome.tabs.create with active:false leaves the window alone) and the
+        # proxy then hands the new tab's id back as if Chromium had made it.
+        url = params.get("url") or "about:blank"
+        if url != "about:blank":
+            return "reply", _reply(message, {"error": {
+                "code": -32000,
+                "message": "Browsr: agents open new tabs as about:blank and navigate afterwards",
+            }})
+        return "open_tab", message
     return "forward", data
 
 
@@ -291,6 +304,13 @@ class _Handler(BaseHTTPRequestHandler):
                     if action == "reply":
                         client.send(OP_TEXT, out)
                         continue
+                    if action == "open_tab":
+                        # Off the read loop: finding the tab can take a second
+                        # and the MCP server keeps sending meanwhile.
+                        threading.Thread(
+                            target=self._create_tab, args=(client, out), daemon=True
+                        ).start()
+                        continue
                     payload = out
                 upstream.send(opcode, payload)
         except OSError:
@@ -299,6 +319,51 @@ class _Handler(BaseHTTPRequestHandler):
             upstream.close()
             done.wait(2)
             client.close()
+
+
+    def _create_tab(self, client, message):
+        real = self.server.real
+        nonce = os.urandom(6).hex()
+        url = f"about:blank#browsr-{nonce}"
+        try:
+            self.server.open_tab(url)
+            target_id = _find_target(real, url, timeout=10)
+            body = {"result": {"targetId": target_id}}
+        except Exception as error:  # a refusal here must reach the agent, not kill the pump
+            body = {"error": {"code": -32000, "message": f"Browsr could not open a background tab: {error}"}}
+        try:
+            client.send(OP_TEXT, _reply(message, body))
+        except OSError:
+            pass
+
+
+def _find_target(real, url, timeout):
+    """Poll the browser's own target list until the tab we just made appears."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://{real[0]}:{real[1]}/json/list", timeout=5) as response:
+                for target in json.loads(response.read()):
+                    if target.get("url") == url and target.get("type") == "page":
+                        return target["id"]
+        except (OSError, ValueError):
+            pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError("the new tab never appeared")
+        time.sleep(0.05)
+
+
+def open_tab_with_bridge(url):
+    """Default tab opener: ask the Browsr extension through bridge.py.
+
+    The proxy runs in the agent's Herdr pane, so the workspace the tab belongs
+    to is read from this process's environment by the bridge.
+    """
+    result = subprocess.run(
+        [str(BRIDGE), "open-tab", url], capture_output=True, text=True, timeout=20
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "bridge open-tab failed")
 
 
 def _rewrite(value, real_netloc, proxy_netloc):
@@ -318,7 +383,7 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def start_proxy(real_endpoint):
+def start_proxy(real_endpoint, open_tab=open_tab_with_bridge):
     """Start the proxy against http://127.0.0.1:PORT; returns (server, proxy_url).
 
     The threads are daemons: the proxy lives and dies with the process that
@@ -327,5 +392,6 @@ def start_proxy(real_endpoint):
     parts = urlsplit(real_endpoint)
     server = _Server(("127.0.0.1", 0), _Handler)
     server.real = (parts.hostname, parts.port)
+    server.open_tab = open_tab
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}"

@@ -28,19 +28,20 @@ class FilterMessageTests(unittest.TestCase):
         self.assertEqual(action, "reply")
         self.assertEqual(decode(out), {"id": 8, "result": {}})
 
-    def test_create_target_goes_to_background_without_new_window(self):
-        action, out = cdp_filter.filter_message(
-            b'{"id":1,"method":"Target.createTarget","params":{"url":"about:blank","newWindow":true,"background":false}}'
-        )
-        self.assertEqual(action, "forward")
-        message = decode(out)
-        self.assertEqual(message["id"], 1)
-        self.assertEqual(message["params"], {"url": "about:blank", "background": True})
+    def test_create_target_is_handed_to_the_extension_not_forwarded(self):
+        raw = b'{"id":1,"method":"Target.createTarget","params":{"url":"about:blank","newWindow":true,"background":false}}'
+        action, out = cdp_filter.filter_message(raw)
+        self.assertEqual(action, "open_tab")
+        self.assertEqual(out["id"], 1)
 
-    def test_create_target_without_params_still_gets_background(self):
-        action, out = cdp_filter.filter_message(b'{"id":1,"method":"Target.createTarget"}')
-        self.assertEqual(action, "forward")
-        self.assertIs(decode(out)["params"]["background"], True)
+    def test_create_target_without_params_is_also_handed_over(self):
+        action, _ = cdp_filter.filter_message(b'{"id":1,"method":"Target.createTarget"}')
+        self.assertEqual(action, "open_tab")
+
+    def test_create_target_for_another_address_is_refused(self):
+        action, out = cdp_filter.filter_message(b'{"id":1,"method":"Target.createTarget","params":{"url":"file:///etc/passwd"}}')
+        self.assertEqual(action, "reply")
+        self.assertEqual(decode(out)["error"]["code"], -32000)
 
     def test_create_target_in_a_context_is_refused(self):
         action, out = cdp_filter.filter_message(
@@ -75,6 +76,7 @@ class FakeChromium:
 
     def __init__(self):
         self.received = []
+        self.tabs = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -85,6 +87,13 @@ class FakeChromium:
 
             def do_GET(self):
                 port = self.server.server_port
+                if self.path == "/json/list":
+                    body = json.dumps(fake.tabs).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if self.path == "/json/version":
                     body = json.dumps({
                         "Browser": "Fake/1",
@@ -141,7 +150,14 @@ def connect(url):
 class ProxyEndToEndTests(unittest.TestCase):
     def setUp(self):
         self.chromium = FakeChromium()
-        self.server, self.proxy = cdp_filter.start_proxy(self.chromium.url)
+        self.opened = []
+
+        def open_tab(url):
+            # What the extension does: a tab appears in the browser, in the background.
+            self.opened.append(url)
+            self.chromium.tabs.append({"id": "TAB1", "type": "page", "url": url})
+
+        self.server, self.proxy = cdp_filter.start_proxy(self.chromium.url, open_tab=open_tab)
         self.addCleanup(self.chromium.close)
         self.addCleanup(self.server.shutdown)
         self.addCleanup(self.server.server_close)
@@ -158,6 +174,20 @@ class ProxyEndToEndTests(unittest.TestCase):
         self.assertEqual(info["webSocketDebuggerUrl"], f"ws://127.0.0.1:{proxy_port}/devtools/browser/abc")
         self.assertEqual(info["Browser"], "Fake/1")
 
+    def test_a_failed_tab_open_is_an_error_not_a_cdp_fallback(self):
+        def broken(url):
+            raise RuntimeError("extension is not answering")
+
+        self.server.open_tab = broken
+        with urllib.request.urlopen(self.proxy + "/json/version") as response:
+            url = json.loads(response.read())["webSocketDebuggerUrl"]
+        peer = connect(url)
+        self.addCleanup(peer.close)
+        reply = self.ask(peer, {"id": 5, "method": "Target.createTarget", "params": {"url": "about:blank"}})
+        self.assertEqual(reply["error"]["code"], -32000)
+        self.assertIn("extension is not answering", reply["error"]["message"])
+        self.assertEqual(self.chromium.received, [])
+
     def test_commands_through_the_real_seam(self):
         with urllib.request.urlopen(self.proxy + "/json/version") as response:
             url = json.loads(response.read())["webSocketDebuggerUrl"]
@@ -168,14 +198,15 @@ class ProxyEndToEndTests(unittest.TestCase):
                          {"id": 1, "sessionId": "S", "result": {}})
         self.assertEqual(self.chromium.received, [])
 
+        count = len(self.chromium.received)
         reply = self.ask(peer, {"id": 2, "method": "Target.createTarget",
                                 "params": {"url": "about:blank", "newWindow": True}})
-        self.assertEqual(reply["result"]["echo"], "Target.createTarget")
-        reached = json.loads(self.chromium.received[-1])
-        self.assertIs(reached["params"]["background"], True)
-        self.assertNotIn("newWindow", reached["params"])
+        self.assertEqual(reply, {"id": 2, "result": {"targetId": "TAB1"}})
+        self.assertEqual(len(self.opened), 1)
+        self.assertRegex(self.opened[0], r"^about:blank#browsr-[0-9a-f]+$")
+        # Chromium itself never saw a createTarget: that is what raised the window.
+        self.assertEqual(len(self.chromium.received), count)
 
-        count = len(self.chromium.received)
         reply = self.ask(peer, {"id": 3, "method": "Target.createBrowserContext"})
         self.assertEqual(reply["error"]["code"], -32000)
         self.assertEqual(len(self.chromium.received), count)
