@@ -324,6 +324,14 @@ def herdr_host():
     return "app" if app_running() else "tui"
 
 
+# Which projects have a browser. A project has one only if it is in here:
+# a new project, and a new worktree, starts without one. Most never need a
+# browser, and a group per project is noise when half of them are never
+# opened — so the quiet default is nothing, and the first page an agent
+# wants to open is what asks.
+ON_KEY = "browsr.on"
+# How it used to be: everything had a browser unless it was turned off. Read
+# only until a panel has written the list the other way round once.
 SKIP_KEY = "browsr.skip"
 
 
@@ -336,17 +344,28 @@ def app_shared():
 
 
 def skipped_spaces():
-    """Spaces the person has turned Browsr off for.
-
-    Not every project needs a browser, and a group per space is noise when
-    half of them are never opened. The panel writes the list into the app's
-    own shared state, which is also where its other panels keep what they
-    remember, so there is no second file to lose.
-    """
+    """The old list: spaces turned off, back when everything had a browser."""
     chosen = app_shared().get(SKIP_KEY)
     if not isinstance(chosen, dict):
         return set()
     return {space for space, off in chosen.items() if off}
+
+
+def spaces_with_a_browser(known=None):
+    """Which projects have a browser, out of the ones named.
+
+    The panel writes the list into the app's own shared state, where its
+    other panels keep what they remember, so there is no second file to lose.
+
+    `known` is every project there is, and is needed only until a panel has
+    written the new list once: before that, the stored list says which
+    projects were turned *off*, and everything else had one.
+    """
+    chosen = app_shared().get(ON_KEY)
+    if isinstance(chosen, dict):
+        return {space for space, on in chosen.items() if on}
+    off = skipped_spaces()
+    return {space for space in (known or ()) if space not in off}
 
 
 def app_spaces():
@@ -368,7 +387,8 @@ def app_spaces():
         return None
     if not spaces:
         return None
-    skip = skipped_spaces()
+    wanted = spaces_with_a_browser(
+        [space.get("id") for space in spaces if space.get("id")])
     return [
         {
             "workspace_id": space["id"],
@@ -376,7 +396,7 @@ def app_spaces():
             "focused": bool(space.get("active")),
         }
         for space in spaces
-        if space.get("id") and space["id"] not in skip
+        if space.get("id") and space["id"] in wanted
     ]
 
 
@@ -1334,6 +1354,20 @@ SWITCHED_OFF = (
 )
 
 
+def all_space_ids():
+    """Every project the app knows, for reading the old list correctly."""
+    herdr_app = app_cli()
+    if not herdr_app:
+        return []
+    try:
+        output = subprocess.run(
+            [herdr_app, "ls"], capture_output=True, text=True, timeout=8, check=True,
+        )
+        return [s.get("id") for s in json.loads(output.stdout).get("spaces") or [] if s.get("id")]
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+        return []
+
+
 def space_name(workspace_id):
     """A project's name, skipped or not, for a question about it."""
     herdr_app = app_cli()
@@ -1366,7 +1400,7 @@ def ask_to_switch_on(workspace_id, url):
     """
     if herdr_host() != "app" or not workspace_id:
         return
-    if workspace_id not in skipped_spaces():
+    if workspace_id in spaces_with_a_browser(all_space_ids()):
         return
     request = {
         "id": uuid.uuid4().hex,

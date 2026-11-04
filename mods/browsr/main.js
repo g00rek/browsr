@@ -23,9 +23,16 @@ import { exec, spaces, focused, theme, home, notify, run, props, shared, setShar
 // Where Browsr is checked out. Change this line if yours is elsewhere.
 const BRIDGE = `${home()}/Projects/browsr/bridge.py`;
 
-// Which spaces the person has turned Browsr off for: { [spaceId]: true }.
+// Which projects have a browser: { [spaceId]: true }. A project is in here
+// only if someone said so — a new project, and a new worktree, starts
+// without one, because most never need a browser and the first page an
+// agent wants to open is what asks.
+//
 // bridge.py reads it straight out of the app's shared state, so the watcher
 // and the panel cannot come to disagree about it.
+const ON = "browsr.on";
+// How it used to be: everything had one unless it was turned off. Read once,
+// to carry the choices already made over to the list the other way round.
 const SKIP = "browsr.skip";
 
 // How often to ask the browser how it is doing, while the panel is open.
@@ -47,6 +54,7 @@ export default class Browsr extends View {
     this.note = "";
     this.working = null;
     if (!this.isButton()) {
+      this.seedBrowsers();
       setShared(PANEL, { open: true, changed: Date.now() });
       cx.timer.every(STATUS_EVERY, (cx) => this.refresh(cx));
       this.refresh(cx);
@@ -76,9 +84,25 @@ export default class Browsr extends View {
     return props()?.role === "button";
   }
 
-  skipped() {
-    const chosen = shared(SKIP);
+  /** The projects that have a browser, as { [id]: true }. */
+  browsers() {
+    const chosen = shared(ON);
     return chosen && typeof chosen === "object" ? chosen : {};
+  }
+
+  /**
+   * Carry the old list over, once. It said which projects were turned
+   * *off*, so reading it as the new one would take the browser away from
+   * everything at the same moment.
+   */
+  seedBrowsers() {
+    if (shared(ON)) return;
+    const off = shared(SKIP);
+    const map = {};
+    for (const space of spaces()) {
+      if (!(off && typeof off === "object" && off[space.id])) map[space.id] = true;
+    }
+    setShared(ON, map);
   }
 
   /** Ask bridge.py what the browser and the strip of groups look like. */
@@ -114,24 +138,26 @@ export default class Browsr extends View {
     });
   }
 
-  /** How many projects are turned off right now. */
+  /** How many projects have no browser right now. */
   offCount() {
-    const off = this.skipped();
-    return spaces().filter((space) => off[space.id]).length;
+    const on = this.browsers();
+    return spaces().filter((space) => on[space.id] !== true).length;
   }
 
-  /** Give every project a browser group again. */
+  /** Give every project a browser group. */
   allOn(cx) {
-    setShared(SKIP, {});
+    const map = {};
+    for (const space of spaces()) map[space.id] = true;
+    setShared(ON, map);
     this.act(cx, "sync", "every project on");
   }
 
   /** Turn Browsr on or off for one space, and let the strip follow at once. */
   toggle(cx, space) {
-    const chosen = { ...this.skipped() };
+    const chosen = { ...this.browsers() };
     if (chosen[space]) delete chosen[space];
     else chosen[space] = true;
-    setShared(SKIP, chosen);
+    setShared(ON, chosen);
     this.act(cx, "sync", "match");
   }
 
@@ -150,12 +176,12 @@ export default class Browsr extends View {
     // keeps showing whatever came before. Silence looks exactly like a
     // fault, so say it.
     const here = focused()?.space;
-    if (here && this.skipped()[here]) return "this project is turned off below — nothing follows here";
+    if (here && this.browsers()[here] !== true) return "this project has no browser — nothing follows here";
     const strip = this.status.strip ?? {};
     if (strip.windows && strip.windows !== 1) return `${strip.windows} windows — there should be one`;
     const groups = (strip.groups ?? []).length;
-    const off = this.skipped();
-    const wanted = spaces().filter((space) => !off[space.id]).length;
+    const on = this.browsers();
+    const wanted = spaces().filter((space) => on[space.id] === true).length;
     if (groups !== wanted) return `${groups} groups, ${wanted} spaces want one`;
     return `${groups} groups, one per space`;
   }
@@ -195,7 +221,7 @@ export default class Browsr extends View {
   render(cx) {
     if (this.isButton()) return this.renderButton();
     const t = theme();
-    const off = this.skipped();
+    const on = this.browsers();
 
     // Each label names what it acts on, and says what will happen rather
     // than what the machinery is called. "match" on its own reads as a
@@ -214,7 +240,7 @@ export default class Browsr extends View {
         .child(this.working === label ? "…" : label);
 
     const row = (space) => {
-      const on = !off[space.id];
+      const has = on[space.id] === true;
       return h_flex()
         .id(`browsr-space-${space.id}`)
         .items_center()
@@ -234,11 +260,11 @@ export default class Browsr extends View {
             .flex_none()
             .items_center()
             .justify_center()
-            .when(on, (el) =>
+            .when(has, (el) =>
               el.child(svg("mods/browsr/check.svg").size(13).text_color(t.accent)))
         )
-        .child(div().flex_1().text_color(on ? t.foreground : t.dim).child(space.name ?? space.id))
-        .child(div().text_color(t.dim).text_size(11).child(on ? "" : "no browser"));
+        .child(div().flex_1().text_color(has ? t.foreground : t.dim).child(space.name ?? space.id))
+        .child(div().text_color(t.dim).text_size(11).child(has ? "" : "no browser"));
     };
 
     return v_flex()

@@ -889,7 +889,6 @@ class BridgeTests(unittest.TestCase):
                     patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
                     patch.object(bridge.subprocess, "run",
                                  lambda *a, **k: subprocess.CompletedProcess(a, 0, answer, "")):
-                self.assertEqual(bridge.skipped_spaces(), {"sp2"})
                 self.assertEqual([s["label"] for s in bridge.app_spaces()], ["api"])
 
     def test_turning_a_space_back_on_is_remembered_as_off_being_false(self):
@@ -909,6 +908,36 @@ class BridgeTests(unittest.TestCase):
             (home / "shared.json").write_text("{ not json")
             with patch.object(bridge, "app_home", lambda: home):
                 self.assertEqual(bridge.skipped_spaces(), set())
+
+    def test_a_new_project_starts_without_a_browser(self):
+        """A project has one only if it is on the list. A new project — and a
+        new worktree — is not, so nothing is made for it until someone says
+        so or an agent asks."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "shared.json").write_text(json.dumps({"browsr.on": {"sp1": True}}))
+            with patch.object(bridge, "app_home", lambda: home):
+                self.assertEqual(
+                    bridge.spaces_with_a_browser(["sp1", "sp2", "sp3"]), {"sp1"})
+
+    def test_the_old_list_still_reads_the_old_way_round(self):
+        """Before the switch the stored list said which projects were turned
+        *off*. Until a panel has written the new one, reading it as the new
+        one would take the browser away from everything at once."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "shared.json").write_text(json.dumps({"browsr.skip": {"sp2": True}}))
+            with patch.object(bridge, "app_home", lambda: home):
+                self.assertEqual(
+                    bridge.spaces_with_a_browser(["sp1", "sp2", "sp3"]), {"sp1", "sp3"})
+
+    def test_turning_one_off_in_the_new_list_is_the_key_going_away(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "shared.json").write_text(
+                json.dumps({"browsr.on": {"sp1": True, "sp2": False}}))
+            with patch.object(bridge, "app_home", lambda: home):
+                self.assertEqual(bridge.spaces_with_a_browser(["sp1", "sp2"]), {"sp1"})
 
     def test_an_app_that_will_not_answer_is_not_a_user_with_no_spaces(self):
         """The extension reads an empty list as "say nothing" on purpose."""
@@ -1031,7 +1060,7 @@ class BridgeTests(unittest.TestCase):
                     patch.object(bridge, "STATE_DIR", Path(directory)), \
                     patch.object(bridge, "ASK_FILE", ask), \
                     patch.object(bridge, "ANSWER_FILE", answer), \
-                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "spaces_with_a_browser", lambda known=None: set()), \
                     patch.object(bridge, "space_name", lambda _id: "brain"):
                 threading.Thread(target=say_yes, daemon=True).start()
                 bridge.ask_to_switch_on("sp9", "http://localhost:3000")
@@ -1058,7 +1087,7 @@ class BridgeTests(unittest.TestCase):
                     patch.object(bridge, "STATE_DIR", Path(directory)), \
                     patch.object(bridge, "ASK_FILE", ask), \
                     patch.object(bridge, "ANSWER_FILE", answer), \
-                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "spaces_with_a_browser", lambda known=None: set()), \
                     patch.object(bridge, "space_name", lambda _id: "brain"):
                 threading.Thread(target=say_no, daemon=True).start()
                 with self.assertRaises(RuntimeError) as refused:
@@ -1075,7 +1104,7 @@ class BridgeTests(unittest.TestCase):
                     patch.object(bridge, "ASK_FILE", ask), \
                     patch.object(bridge, "ANSWER_FILE", Path(directory) / "answer.json"), \
                     patch.object(bridge, "ASK_SECONDS", 0.4), \
-                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "spaces_with_a_browser", lambda known=None: set()), \
                     patch.object(bridge, "space_name", lambda _id: "brain"):
                 with self.assertRaises(RuntimeError) as refused:
                     bridge.ask_to_switch_on("sp9", None)
@@ -1093,7 +1122,7 @@ class BridgeTests(unittest.TestCase):
                     patch.object(bridge, "ANSWER_FILE", Path(directory) / "answer.json"), \
                     patch.object(bridge, "ASK_SECONDS", 0.3), \
                     patch.object(bridge, "space_name", lambda _id: "brain"), \
-                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "spaces_with_a_browser", lambda known=None: set()), \
                     patch.object(bridge, "ensure_browser",
                                  lambda **kw: self.fail("started the browser for a project that is off")):
                 with self.assertRaises(RuntimeError) as refused:
@@ -1106,7 +1135,7 @@ class BridgeTests(unittest.TestCase):
         away, and an agent that has just been refused should be able to look."""
         seen = []
         with patch.object(bridge, "HOST_OVERRIDE", "app"), \
-                patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                patch.object(bridge, "spaces_with_a_browser", lambda known=None: set()), \
                 patch.object(bridge, "ensure_browser", lambda **kw: seen.append("started")), \
                 patch.object(bridge, "socket_request",
                              lambda *a, **k: {"ok": True, "result": {"tabs": []}}):
