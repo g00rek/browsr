@@ -3,3 +3,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 *.log
+
+# Written into a mod folder by the Herdr app itself, and rewritten on every
+# start: `herdr-app check` drops them beside the mod it is given.
+mods/*/gpui-kit.d.ts
+mods/*/herdr.d.ts
+mods/*/jsconfig.json

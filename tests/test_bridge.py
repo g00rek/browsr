@@ -662,17 +662,37 @@ class BridgeTests(unittest.TestCase):
                     command(*arguments)
             self.assertEqual(launched, [], f"{command.__name__} started the browser")
 
-    def test_the_launch_action_still_starts_it(self):
-        launched = []
+    def launch_under(self, host):
+        """Run the launch action and report what it started, as argv lists."""
+        started = []
         with sandboxed_state(), \
+                patch.object(bridge, "HOST_OVERRIDE", host), \
                 patch.object(bridge, "setup", return_value="/usr/bin/chromium"), \
                 patch.object(bridge, "bridge_alive", side_effect=[False, False, True]), \
                 patch.object(bridge, "browser_alive", return_value=False), \
-                patch.object(bridge.subprocess, "Popen", lambda *a, **k: launched.append(a)), \
+                patch.object(bridge.subprocess, "Popen",
+                             lambda argv, *a, **k: started.append(list(argv))), \
                 patch.object(bridge, "show_window", lambda: True), \
                 patch.object(bridge, "sync_workspaces", lambda: None):
             bridge.launch()
-        self.assertEqual(len(launched), 1, "the one action that may start it did not")
+        return started
+
+    def test_the_launch_action_still_starts_it(self):
+        started = self.launch_under("tui")
+        self.assertEqual(len(started), 1, "the one action that may start it did not")
+        self.assertIn("/usr/bin/chromium", started[0][0])
+
+    def test_under_the_app_the_launch_action_also_starts_the_watcher(self):
+        """The app has no startup hook and no plugins, so nothing else would,
+        and without it the browser stops following the space in front."""
+        started = self.launch_under("app")
+        self.assertEqual(len(started), 2, [argv[:2] for argv in started])
+        self.assertIn("/usr/bin/chromium", started[0][0])
+        self.assertEqual(started[1][-2:], ["--app", "watch"])
+
+    def test_under_the_terminal_herdr_no_second_watcher_is_started(self):
+        """There the plugin's own startup line runs it, once per machine."""
+        self.assertEqual(len(self.launch_under("tui")), 1)
 
     def test_a_running_browser_is_never_launched_a_second_time(self):
         """Chromium refuses to start twice; the second start opens a window.
@@ -775,6 +795,101 @@ class BridgeTests(unittest.TestCase):
 
         self.assertEqual(native_host.SOCKET_PATH, bridge.SOCKET_PATH)
         self.assertEqual(native_host.STATE_DIR, bridge.STATE_DIR)
+
+    def test_the_app_is_told_apart_from_the_terminal_herdr(self):
+        """They are two programs with their own spaces and their own ids.
+
+        A pane of the terminal one carries HERDR_SOCKET_PATH; a terminal the
+        app started carries HC_TERMINAL_ID, because herdr-core puts it there.
+        """
+        with patch.object(bridge, "HOST_OVERRIDE", None):
+            with patch.dict(os.environ, {"HERDR_SOCKET_PATH": "/run/herdr.sock"}, clear=True):
+                self.assertEqual(bridge.herdr_host(), "tui")
+            with patch.dict(os.environ, {"HC_TERMINAL_ID": "t8"}, clear=True):
+                self.assertEqual(bridge.herdr_host(), "app")
+
+        with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                patch.dict(os.environ, {"HERDR_SOCKET_PATH": "/run/herdr.sock"}):
+            self.assertEqual(bridge.herdr_host(), "app", "the caller's word did not win")
+
+    def test_the_two_herdrs_never_share_a_namespace(self):
+        """One namespace for both would hand each the other's tab groups."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(bridge, "HOST_OVERRIDE", "app"):
+                app = bridge.herdr_session_id()
+            with patch.object(bridge, "HOST_OVERRIDE", "tui"), \
+                    patch.object(bridge, "_HERDR_SOCKET_CACHE", "/run/herdr.sock"):
+                tui = bridge.herdr_session_id()
+        self.assertEqual(app, str(bridge.app_home()))
+        self.assertNotEqual(app, tui)
+
+    def test_the_app_space_list_is_translated_once(self):
+        answer = json.dumps({"spaces": [
+            {"id": "sp1", "name": "api", "active": False, "tabs": []},
+            {"id": "sp2", "name": None, "active": True, "tabs": []},
+        ]})
+        with patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
+                patch.object(bridge.subprocess, "run",
+                             lambda *a, **k: subprocess.CompletedProcess(a, 0, answer, "")):
+            self.assertEqual(bridge.app_spaces(), [
+                {"workspace_id": "sp1", "label": "api", "focused": False},
+                # No name yet: the id, never an empty label, which the strip
+                # would show as a group with no title.
+                {"workspace_id": "sp2", "label": "sp2", "focused": True},
+            ])
+
+    def test_an_app_that_will_not_answer_is_not_a_user_with_no_spaces(self):
+        """The extension reads an empty list as "say nothing" on purpose."""
+        with patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
+                patch.object(bridge.subprocess, "run",
+                             lambda *a, **k: subprocess.CompletedProcess(a, 0, "{}", "")):
+            self.assertIsNone(bridge.app_spaces())
+
+    def test_a_caller_in_an_app_terminal_finds_its_own_space(self):
+        """The app hands out a terminal address where the other Herdr hands
+        out a workspace id, so the space has to be looked up."""
+        answer = json.dumps({"spaces": [
+            {"id": "sp1", "name": "api", "tabs": [{"terminals": [{"terminal": "t1"}]}]},
+            {"id": "sp2", "name": "docs", "tabs": [{"terminals": [{"terminal": "t8"}]}]},
+        ]})
+        with patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
+                patch.object(bridge.subprocess, "run",
+                             lambda *a, **k: subprocess.CompletedProcess(a, 0, answer, "")):
+            self.assertEqual(bridge.app_space_of_terminal("t8"), "sp2")
+            self.assertIsNone(bridge.app_space_of_terminal("t99"))
+
+    def test_the_space_in_front_is_followed_once_per_change(self):
+        """The app rewrites view.json on every switch. Browsr may act on the
+        change and on nothing else: syncing on every tick would re-send the
+        whole list five times a second."""
+        with tempfile.TemporaryDirectory() as directory:
+            view = Path(directory) / "view.json"
+            view.write_text(json.dumps({"active": "sp1"}))
+            synced = []
+            with patch.object(bridge, "app_view_file", lambda: view), \
+                    patch.object(bridge, "sync_workspaces", lambda: synced.append(1)), \
+                    patch.object(bridge, "_VIEW_STAMP", None):
+                space = bridge.app_focused_space()
+                for _ in range(5):
+                    space = bridge.focus_step(space)
+                self.assertEqual(synced, [], "followed a space that never changed")
+
+                time.sleep(0.01)
+                view.write_text(json.dumps({"active": "sp2"}))
+                for _ in range(5):
+                    space = bridge.focus_step(space)
+
+            self.assertEqual(len(synced), 1, "one switch, one sync")
+            self.assertEqual(space, "sp2")
+
+    def test_a_missing_view_file_is_not_a_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "gone.json"
+            with patch.object(bridge, "app_view_file", lambda: missing), \
+                    patch.object(bridge, "sync_workspaces",
+                                 lambda: self.fail("synced without a view file")):
+                self.assertIsNone(bridge.app_focused_space())
+                self.assertEqual(bridge.focus_step("sp1"), "sp1")
 
     def test_the_browser_is_found_under_the_name_each_distribution_uses(self):
         """Only some distributions call it `chromium`.

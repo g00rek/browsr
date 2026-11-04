@@ -230,6 +230,127 @@ def launch_lock():
         handle.close()
 
 
+# ---------------------------------------------------------------- Herdr app
+#
+# The desktop app is a different program from the Herdr that runs in a
+# terminal: its own server, its own home, its own spaces, and no plugins at
+# all. Everything below is how Browsr learns the same two things from it that
+# it learns from the other one — what the spaces are, and which is in front.
+
+APP_HOME_DEFAULT = Path.home() / ".config/herdr-app"
+
+
+def app_home():
+    return Path(os.environ.get("HERDR_APP_HOME") or APP_HOME_DEFAULT)
+
+
+def app_cli():
+    return os.environ.get("HERDR_APP_BIN_PATH") or shutil.which("herdr-app")
+
+
+def app_running():
+    """Whether the app's window is up and answering."""
+    herdr_app = app_cli()
+    if not herdr_app:
+        return False
+    try:
+        subprocess.run([herdr_app, "status"], capture_output=True, timeout=3, check=True)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+HOST_OVERRIDE = None
+
+
+def herdr_host():
+    """Which Herdr this process belongs to: the app, or the terminal one.
+
+    A pane of the terminal Herdr carries HERDR_SOCKET_PATH; a terminal the
+    app started carries HC_TERMINAL_ID, because herdr-core puts it there.
+    Outside both — an agent's own shell, a hook run by hand — ask whichever
+    is actually running, and prefer the app only when the other is absent, so
+    that an existing setup does not change under anyone.
+    """
+    if HOST_OVERRIDE:
+        return HOST_OVERRIDE
+    if os.environ.get("HERDR_SOCKET_PATH"):
+        return "tui"
+    if os.environ.get("HC_TERMINAL_ID") or os.environ.get("HERDR_APP_HOME"):
+        return "app"
+    if shutil.which("herdr"):
+        return "tui"
+    return "app" if app_running() else "tui"
+
+
+def app_spaces():
+    """The app's spaces, in the shape the extension is told about.
+
+    None rather than an empty list when the app will not answer: the
+    extension reads an empty list as "say nothing", which is what keeps a
+    Herdr that is down from being read as a user with no projects.
+    """
+    herdr_app = app_cli()
+    if not herdr_app:
+        return None
+    try:
+        output = subprocess.run(
+            [herdr_app, "ls"], capture_output=True, text=True, timeout=8, check=True,
+        )
+        spaces = json.loads(output.stdout).get("spaces")
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    if not spaces:
+        return None
+    return [
+        {
+            "workspace_id": space["id"],
+            "label": space.get("name") or space["id"],
+            "focused": bool(space.get("active")),
+        }
+        for space in spaces
+        if space.get("id")
+    ]
+
+
+def app_space_of_terminal(terminal=None):
+    """The space holding a terminal, for a caller that only knows its own.
+
+    The terminal Herdr hands every pane HERDR_WORKSPACE_ID. The app hands out
+    a terminal address instead, so the space has to be looked up — which the
+    space list already describes, tab by tab.
+    """
+    terminal = terminal or os.environ.get("HC_TERMINAL_ID")
+    if not terminal:
+        return None
+    herdr_app = app_cli()
+    if not herdr_app:
+        return None
+    try:
+        output = subprocess.run(
+            [herdr_app, "ls"], capture_output=True, text=True, timeout=8, check=True,
+        )
+        spaces = json.loads(output.stdout).get("spaces") or []
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    for space in spaces:
+        for tab in space.get("tabs") or []:
+            for item in tab.get("terminals") or []:
+                if item.get("terminal") == terminal:
+                    return space.get("id")
+    return None
+
+
+def current_workspace_id():
+    """The workspace this command belongs to, under either Herdr."""
+    from_environment = os.environ.get("HERDR_WORKSPACE_ID")
+    if from_environment:
+        return from_environment
+    if herdr_host() == "app":
+        return app_space_of_terminal()
+    return None
+
+
 def herdr_session_id():
     """Which Herdr server a workspace id belongs to.
 
@@ -242,6 +363,11 @@ def herdr_session_id():
     from_environment = os.environ.get("HERDR_SOCKET_PATH")
     if from_environment:
         return from_environment
+    # The app's home, not a socket: the two Herdrs each have their own spaces
+    # and their own ids, and a shared namespace would hand one of them the
+    # other's tab groups.
+    if herdr_host() == "app":
+        return str(app_home())
     global _HERDR_SOCKET_CACHE
     if _HERDR_SOCKET_CACHE:
         return _HERDR_SOCKET_CACHE
@@ -477,6 +603,8 @@ def herdr_workspaces():
     extension treats an empty list as "say nothing" precisely so that a Herdr
     that is down cannot be read as a user with no workspaces.
     """
+    if herdr_host() == "app":
+        return app_spaces()
     herdr = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr")
     if not herdr:
         return None
@@ -489,6 +617,30 @@ def herdr_workspaces():
     except (OSError, KeyError, ValueError, subprocess.SubprocessError,
             json.JSONDecodeError):
         return None
+
+
+def tui_running():
+    """Whether the terminal Herdr is answering on its socket."""
+    path = os.environ.get("HERDR_SOCKET_PATH") or str(DEFAULT_HERDR_SOCKET)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(0.25)
+    try:
+        client.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        client.close()
+
+
+# Deliberately not computed here. Taking a group from the other Herdr is
+# destructive — the groups it no longer owns are pruned against a list that
+# is not theirs, and their tabs close with them. It rested on guessing that
+# the other Herdr was not running, and the guess was wrong the first time it
+# ran for real: called from the app's mod, with none of a pane's variables
+# and no `herdr-app` on PATH, Browsr read the other Herdr's spaces and
+# emptied the strip. Adopting now happens only when a person asks for it, in
+# `adopt_other_herdr`.
 
 
 def workspace_set_message(workspaces, session_id=None):
@@ -532,8 +684,58 @@ def sync_workspaces():
         return
 
 
+def other_session_id():
+    """The namespace of the Herdr this process is not running under."""
+    return str(DEFAULT_HERDR_SOCKET) if herdr_host() == "app" else str(app_home())
+
+
+def adopt_other_herdr():
+    """Take over the groups the other Herdr still owns, on purpose.
+
+    `sync` only does this when the other Herdr is plainly not running. Someone
+    who moved to the desktop app while the old server is still up has to say
+    so, because two Herdrs side by side is a real setup and the groups would
+    be taken from under the other one.
+    """
+    workspaces = herdr_workspaces()
+    if not workspaces:
+        raise RuntimeError("Herdr did not answer, so there is nothing to adopt into")
+    message = workspace_set_message(workspaces)
+    message["adopt_sessions"] = [other_session_id()]
+    message["request_id"] = uuid.uuid4().hex
+    ensure_browser(show=False)
+    response = socket_request(message, timeout=20)
+    if not response.get("ok"):
+        raise RuntimeError(response.get("error", "The extension refused the list"))
+    print(f"Adopted any groups still owned by {other_session_id()}")
+
+
+def start_watcher():
+    """Make sure something is following the space in front.
+
+    The terminal Herdr runs this for us from the plugin's startup line. The
+    app has no such thing, so the one action that starts Browsr starts it
+    too. Spawning a second one is harmless: they take a lock, and the loser
+    exits at once.
+    """
+    if herdr_host() != "app":
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, str(ROOT / "bridge.py"), "--app", "watch"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        print(f"Browsr could not start its watcher: {error}", file=sys.stderr)
+
+
 def launch():
-    return ensure_browser(show=True, sync=True, may_launch=True)
+    outcome = ensure_browser(show=True, sync=True, may_launch=True)
+    start_watcher()
+    return outcome
 
 
 def extension_fingerprint():
@@ -635,8 +837,57 @@ def health_step(state, now):
     return {"unwell_since": since, "announced": announced}
 
 
+FOCUS_POLL_SECONDS = 0.2
+
+
+def app_view_file():
+    return app_home() / "view.json"
+
+
+def app_focused_space():
+    """The space the app window has in front, straight off its own record.
+
+    The app rewrites view.json on every switch, so this is the whole of the
+    following mechanism: no panel has to be on screen, no key pressed, and
+    nothing is asked of the app five times a second.
+    """
+    try:
+        return json.loads(app_view_file().read_text()).get("active")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+_VIEW_STAMP = None
+
+
+def focus_step(last):
+    """One tick: tell Browsr when, and only when, the space has changed."""
+    global _VIEW_STAMP
+    try:
+        stamp = app_view_file().stat().st_mtime_ns
+    except OSError:
+        return last
+    if stamp == _VIEW_STAMP:
+        return last
+    _VIEW_STAMP = stamp
+    space = app_focused_space()
+    if not space or space == last:
+        return last
+    try:
+        sync_workspaces()
+    except Exception as error:
+        print(f"Browsr could not follow the space: {error}", file=sys.stderr)
+    return space
+
+
 def watch_health():
-    """Run by Herdr at startup; one per machine, not one per session."""
+    """Run by Herdr at startup; one per machine, not one per session.
+
+    Under the desktop app this also follows the space in front. The app has
+    no startup hook and no plugins, so nothing else would: a panel there is
+    alive only while it is on screen, and the browser has to keep up whether
+    or not the person is looking at one.
+    """
     try:
         # Without the mkdir this raises FileNotFoundError when the state
         # directory is not there yet — the startup hook running before the
@@ -649,12 +900,20 @@ def watch_health():
     except OSError:
         return  # another Herdr session is already watching
     state = None
+    space = app_focused_space()
+    following = herdr_host() == "app"
+    next_health = 0.0
     while True:
-        try:
-            state = health_step(state, time.monotonic())
-        except Exception as error:
-            print(f"Browsr health watch failed: {error}", file=sys.stderr)
-        time.sleep(HEALTH_POLL_SECONDS)
+        now = time.monotonic()
+        if now >= next_health:
+            next_health = now + HEALTH_POLL_SECONDS
+            try:
+                state = health_step(state, now)
+            except Exception as error:
+                print(f"Browsr health watch failed: {error}", file=sys.stderr)
+        if following:
+            space = focus_step(space)
+        time.sleep(FOCUS_POLL_SECONDS if following else HEALTH_POLL_SECONDS)
 
 
 def browser_pids(proc_root=Path("/proc")):
@@ -904,7 +1163,10 @@ def ask_extension(kind, workspace_id, failure, **extra):
     timeout or a missing field.
     """
     if not workspace_id:
-        raise RuntimeError("No HERDR_WORKSPACE_ID; run this from inside a Herdr pane")
+        raise RuntimeError(
+            "No workspace to act on; run this from inside a Herdr pane, or "
+            "from a terminal the Herdr app started"
+        )
     ensure_browser(show=False)
     response = socket_request({
         "type": kind,
@@ -937,7 +1199,7 @@ def open_url(raw_url):
     # workspace id but not what the user called it, and sending the id as the
     # label renamed the group under them.
     ask_extension(
-        "open_url", os.environ.get("HERDR_WORKSPACE_ID"),
+        "open_url", current_workspace_id(),
         "Chromium did not open the address", url=raw_url, focus=False,
     )
 
@@ -955,14 +1217,14 @@ def open_tab(raw_url):
     if not parsed or not (parsed.scheme.lower() in {"http", "https"} or raw_url.startswith("about:blank")):
         raise RuntimeError("Browsr opens only http(s) addresses and about:blank")
     response = ask_extension(
-        "open_tab", os.environ.get("HERDR_WORKSPACE_ID"),
+        "open_tab", current_workspace_id(),
         "Chromium did not open the tab", url=raw_url,
     )
     print(json.dumps(response.get("result") or {}))
 
 
 def workspace_tabs():
-    workspace_id = os.environ.get("HERDR_WORKSPACE_ID")
+    workspace_id = current_workspace_id()
     response = ask_extension(
         "workspace_tabs", workspace_id, "Could not read the workspace tabs",
     )
@@ -990,6 +1252,12 @@ def devtools_endpoint():
 
 
 def main():
+    # The app's mod runs this through `exec`, which gives it the person's own
+    # environment — no pane variables, so nothing in it says which Herdr is
+    # asking. The caller knows, so it says so.
+    global HOST_OVERRIDE
+    if len(sys.argv) > 1 and sys.argv[1] in ("--app", "--tui"):
+        HOST_OVERRIDE = sys.argv.pop(1)[2:]
     if len(sys.argv) == 3 and sys.argv[1] == "open-url":
         open_url(sys.argv[2])
         return
@@ -997,16 +1265,17 @@ def main():
         open_tab(sys.argv[2])
         return
     if len(sys.argv) != 2 or sys.argv[1] not in {
-        "setup", "launch", "sync", "status", "panel", "cleanup", "watch",
-        "hook", "open-link", "workspace-tabs", "mcp-endpoint",
+        "setup", "launch", "sync", "adopt", "status", "panel", "cleanup",
+        "watch", "hook", "open-link", "workspace-tabs", "mcp-endpoint",
     }:
         raise RuntimeError(
-            "Usage: bridge.py setup|launch|sync|status|panel|cleanup|watch"
+            "Usage: bridge.py setup|launch|sync|adopt|status|panel|cleanup|watch"
             "|hook|open-link|open-url URL|open-tab URL|workspace-tabs|mcp-endpoint"
         )
     {
         "setup": setup,
         "sync": sync_workspaces,
+        "adopt": adopt_other_herdr,
         "status": print_status,
         "panel": toggle_panel,
         "cleanup": print_cleanup,

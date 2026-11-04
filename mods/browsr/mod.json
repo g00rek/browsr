@@ -1,0 +1,5 @@
+{
+  "place": "none",
+  "title": "Browsr",
+  "overlay": { "kind": "popup", "at": "top", "offset": 60, "width": 520 }
+}

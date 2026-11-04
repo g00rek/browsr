@@ -203,6 +203,21 @@ async function closeWorkspaceGroup(key) {
 }
 
 async function syncWorkspaceSet(message) {
+	// Groups left behind by a Herdr that is gone. Moving between the terminal
+	// Herdr and the desktop app changes which one a group belongs to, and
+	// without this every project ends up with a second group beside its own:
+	// the old one is still owned, so the title lookup below will not take it.
+	// Only the ownership is dropped, never a tab — the lookup then adopts the
+	// group it finds, which is the same path a group made by hand goes through.
+	for (const session of message.adopt_sessions || []) {
+		const stale = `${session}\u001f`;
+		for (const key of [...groups.keys()]) {
+			if (!key.startsWith(stale)) continue;
+			groups.delete(key);
+			lastActiveTabs.delete(key);
+		}
+	}
+
 	const wanted = new Set();
 	for (const workspace of message.workspaces || []) {
 		wanted.add(workspaceKey(message.session_id, workspace.workspace_id));

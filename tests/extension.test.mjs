@@ -314,3 +314,51 @@ test('open_tab refuses addresses that are not web pages', async () => {
 	}
 	assert.equal(harness.state.tabs.filter(tab => tab.url.startsWith('file:')).length, 0);
 });
+
+// The other Herdr's namespace. Deliberately nothing like SESSION: both tests
+// below are about one session not touching another's groups, and giving them
+// the same string would have made them pass by pruning instead of adopting.
+const OTHER_HERDR = '/home/tester/.config/herdr-app';
+
+test('groups of a Herdr that is gone are taken over, not duplicated', async () => {
+	// Moving from the terminal Herdr to the desktop app changes the session a
+	// group belongs to. The old group is still owned, so the title lookup skips
+	// it and every project ends up with a second, empty group beside the one it
+	// already has.
+	const harness = await boot({
+		windows: [1],
+		tabs: [{ id: 80, windowId: 1, groupId: 800 }],
+		groups: [{ id: 800, windowId: 1, title: 'api' }],
+		storage: {
+			herdrBrowserState: {
+				windowId: 1,
+				groups: { [`${OTHER_HERDR}\u001fw16`]: 800 },
+				lastActiveTabs: {},
+			},
+		},
+	});
+
+	await harness.deliver({
+		...workspaceSet(SESSION, ['sp1', 'api']),
+		adopt_sessions: [OTHER_HERDR],
+	});
+
+	assert.deepEqual(harness.strip().map(group => group.title), ['api']);
+	assert.equal(harness.state.groups.find(g => g.title === 'api').id, 800,
+		'made a new group instead of taking over the one that was there');
+});
+
+test('a Herdr that is still running does not lose its groups', async () => {
+	// Two Herdrs side by side is a supported setup: the bridge names a session
+	// only when it is not answering, and nothing else may be taken.
+	const harness = await boot({ windows: [1] });
+	await harness.deliver(workspaceSet(OTHER_HERDR, ['w16', 'api']));
+	await harness.deliver(workspaceSet(SESSION, ['sp1', 'docs']));
+
+	await harness.deliver({
+		...workspaceSet(SESSION, ['sp1', 'docs']),
+		adopt_sessions: [],
+	});
+
+	assert.deepEqual(harness.strip().map(group => group.title).sort(), ['api', 'docs']);
+});
