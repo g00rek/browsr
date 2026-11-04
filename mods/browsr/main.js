@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { exec, spaces, theme, home, notify, run, props, shared, setShared } from "herdr";
+import { exec, spaces, focused, theme, home, notify, run, props, shared, setShared } from "herdr";
 
 // Browsr keeps one browser tab group per space, named after it, and brings
 // that group forward when you switch spaces.
@@ -114,6 +114,18 @@ export default class Browsr extends View {
     });
   }
 
+  /** How many projects are turned off right now. */
+  offCount() {
+    const off = this.skipped();
+    return spaces().filter((space) => off[space.id]).length;
+  }
+
+  /** Give every project a browser group again. */
+  allOn(cx) {
+    setShared(SKIP, {});
+    this.act(cx, "sync", "every project on");
+  }
+
   /** Turn Browsr on or off for one space, and let the strip follow at once. */
   toggle(cx, space) {
     const chosen = { ...this.skipped() };
@@ -133,6 +145,12 @@ export default class Browsr extends View {
     // spaces is a separate program. It can be gone while everything else
     // looks fine, and then nothing moves when you switch.
     if (this.status.following === false) return "running, but nothing is following your spaces";
+    // The commonest surprise by far: the project you are looking at is
+    // turned off below, so switching to it moves nothing and the browser
+    // keeps showing whatever came before. Silence looks exactly like a
+    // fault, so say it.
+    const here = focused()?.space;
+    if (here && this.skipped()[here]) return "this project is turned off below — nothing follows here";
     const strip = this.status.strip ?? {};
     if (strip.windows && strip.windows !== 1) return `${strip.windows} windows — there should be one`;
     const groups = (strip.groups ?? []).length;
@@ -252,6 +270,18 @@ export default class Browsr extends View {
             "Close it and start it again. The only way it reads a changed extension."))
           .child(action("close browser", "quit",
             "Quit the browser. The tabs come back when you show it again."))
+          // Only while something is off, and it says how much it will undo.
+          .when(this.offCount() > 0, (el) => el.child(
+            div()
+              .id("browsr-all-on")
+              .px(9).py(3).rounded(5)
+              .bg(t.surface)
+              .text_color(this.working === "every project on" ? t.dim : t.foreground)
+              .hover((s) => s.bg(t.hover))
+              .tooltip("Give all of them a browser group again.")
+              .on_click((_event, cx) => this.allOn(cx))
+              .child(this.working === "every project on"
+                ? "…" : `turn on ${this.offCount()} off`)))
           .child(action("take over old groups", "adopt",
             "Once, after moving from the Herdr that runs in a terminal: "
             + "the groups it still owns are taken over instead of being made again beside them."))

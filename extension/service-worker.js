@@ -363,6 +363,11 @@ async function browserStatus() {
 			tabs: tabs.filter(tab => tab.groupId === group.id).length,
 			// A group nobody owns is one no workspace will ever take away.
 			adopted: !owned.has(group.id),
+			// Exactly one group should be open at a time: the project in
+			// front. Without this, "the tabs are not following" and "the
+			// tabs are following the wrong project" look identical from
+			// outside the browser, and neither can be checked.
+			open: !group.collapsed,
 		})),
 	};
 }
