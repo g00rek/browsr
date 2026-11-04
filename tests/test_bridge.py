@@ -1011,6 +1011,33 @@ class BridgeTests(unittest.TestCase):
                 finally:
                     handle.close()
 
+    def test_a_page_is_not_opened_into_a_project_that_is_switched_off(self):
+        """A project switched off is left out of the list the extension is
+        given, and whatever is missing from that list is pruned. Opening a
+        page in one made a group that the next project switch took away, with
+        an agent working in those tabs: it lost them twice in five minutes and
+        nothing said why."""
+        with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                patch.object(bridge, "ensure_browser",
+                             lambda **kw: self.fail("started the browser for a project that is off")):
+            with self.assertRaises(RuntimeError) as refused:
+                bridge.ask_extension("open_url", "sp9", "nope", url="http://localhost:3000")
+            self.assertIn("switched off", str(refused.exception))
+            self.assertIn("alt-b", str(refused.exception), "said no without saying where the switch is")
+
+    def test_reading_the_tabs_of_a_project_that_is_off_is_still_allowed(self):
+        """Only making a group is refused. Asking what is there takes nothing
+        away, and an agent that has just been refused should be able to look."""
+        seen = []
+        with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                patch.object(bridge, "ensure_browser", lambda **kw: seen.append("started")), \
+                patch.object(bridge, "socket_request",
+                             lambda *a, **k: {"ok": True, "result": {"tabs": []}}):
+            bridge.ask_extension("workspace_tabs", "sp9", "nope")
+        self.assertEqual(seen, ["started"])
+
     def test_a_missing_view_file_is_not_a_switch(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "gone.json"

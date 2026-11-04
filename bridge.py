@@ -1321,6 +1321,28 @@ def is_local_url(raw):
         return False
 
 
+def refuse_if_switched_off(workspace_id):
+    """Stop before making a group the next sync would take straight back.
+
+    A project switched off in the panel is left out of the list the extension
+    is given, and anything missing from that list is pruned. Opening a page in
+    such a project therefore made a group that lived until the next time
+    anyone switched projects — and an agent working in those tabs lost them
+    mid-sentence, twice in five minutes, with no sign of why.
+
+    Refusing says the one thing that is actually true, and the person reading
+    it has the switch.
+    """
+    if herdr_host() != "app" or not workspace_id:
+        return
+    if workspace_id in skipped_spaces():
+        raise RuntimeError(
+            "Browsr is switched off for this project; its tabs would be taken "
+            "away again at the next switch. Turn it on in the Browsr panel "
+            "(alt-b) or in the project list, then try again"
+        )
+
+
 def ask_extension(kind, workspace_id, failure, **extra):
     """One question to the extension, about one workspace.
 
@@ -1334,6 +1356,8 @@ def ask_extension(kind, workspace_id, failure, **extra):
             "No workspace to act on; run this from inside a Herdr pane, or "
             "from a terminal the Herdr app started"
         )
+    if kind in ("open_url", "open_tab"):
+        refuse_if_switched_off(workspace_id)
     ensure_browser(show=False)
     response = socket_request({
         "type": kind,
