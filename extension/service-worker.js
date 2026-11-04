@@ -150,7 +150,12 @@ async function mergeUnownedGroups(canonical, title) {
 	}
 }
 
-async function ensureGroup(sessionId, workspaceId, label) {
+// The nine Chromium allows. Anything else is refused and would throw.
+const GROUP_COLORS = new Set([
+	"grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange",
+]);
+
+async function ensureGroup(sessionId, workspaceId, label, color) {
 	const key = workspaceKey(sessionId, workspaceId);
 	// Empty when the caller knows the workspace id but not its label, which is
 	// what `open_url` sends on purpose. Falling back to the id here gave that
@@ -186,6 +191,10 @@ async function ensureGroup(sessionId, workspaceId, label) {
 	// list closed whatever the user was looking at, and nothing reopened it,
 	// because from the outside the workspace in front had not changed.
 	const update = keepTitle ? {} : { title };
+	// Herdr says what colour a project is, so the strip reads the same as the
+	// list of projects. Only when it has said: a project nobody painted keeps
+	// whatever Chromium gave it, which is better than everything turning grey.
+	if (color && GROUP_COLORS.has(color)) update.color = color;
 	if (isNew) update.collapsed = true;
 	await chrome.tabGroups.update(group.id, update);
 	await saveState();
@@ -223,7 +232,8 @@ async function syncWorkspaceSet(message) {
 	const wanted = new Set();
 	for (const workspace of message.workspaces || []) {
 		wanted.add(workspaceKey(message.session_id, workspace.workspace_id));
-		await ensureGroup(message.session_id, workspace.workspace_id, workspace.label);
+		await ensureGroup(message.session_id, workspace.workspace_id,
+			workspace.label, workspace.color);
 	}
 	// An empty answer is not a claim that Herdr has no workspaces, it is Herdr
 	// failing to answer, and acting on it would wipe the strip.

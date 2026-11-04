@@ -3,6 +3,10 @@
 // that keeps windows, tabs and groups consistent is enough to drive it, and the
 // native port below lets a test push the very messages Herdr pushes.
 
+const GROUP_COLORS = new Set([
+	"grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange",
+]);
+
 export function makeChrome({ storage = {}, windows = [1], tabs = [], groups = [] } = {}) {
 	const state = {
 		nextId: 1000,
@@ -140,6 +144,13 @@ export function makeChrome({ storage = {}, windows = [1], tabs = [], groups = []
 			async update(groupId, properties) {
 				const group = state.groups.find(item => item.id === groupId);
 				if (!group) throw new Error(`No group with id ${groupId}`);
+				// Chromium takes nine colour names and throws on anything
+				// else. Without this the stub would accept a colour the real
+				// browser refuses, and the guard against that would be the
+				// only code nobody exercises.
+				if (properties.color !== undefined && !GROUP_COLORS.has(properties.color)) {
+					throw new Error(`Invalid value for ColorEnum: ${properties.color}`);
+				}
 				Object.assign(group, properties);
 				return { ...group };
 			},
@@ -191,6 +202,7 @@ export function makeChrome({ storage = {}, windows = [1], tabs = [], groups = []
 			return this.state.groups.map(group => ({
 				title: group.title,
 				windowId: group.windowId,
+				color: group.color,
 				tabs: this.state.tabs.filter(tab => tab.groupId === group.id).length,
 			}));
 		},
