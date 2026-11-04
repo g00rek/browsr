@@ -137,7 +137,10 @@ export default class Browsr extends View {
     const t = theme();
     const off = this.skipped();
 
-    const action = (label, argument) =>
+    // Each label names what it acts on, and says what will happen rather
+    // than what the machinery is called. "match" on its own reads as a
+    // setting, not as an action with a consequence.
+    const action = (label, argument, hint) =>
       div()
         .id(`browsr-${argument}`)
         .px(9)
@@ -146,6 +149,7 @@ export default class Browsr extends View {
         .bg(t.surface)
         .text_color(this.working === label ? t.dim : t.foreground)
         .hover((s) => s.bg(t.hover))
+        .tooltip(hint)
         .on_click((_event, cx) => this.act(cx, argument, label))
         .child(this.working === label ? "…" : label);
 
@@ -193,13 +197,22 @@ export default class Browsr extends View {
           .child(div().flex_1().text_color(t.dim).child(this.words()))
       )
       .child(
+        // Wrapping, because the fifth button only appears sometimes and a
+        // row that silently runs past the edge hides it altogether.
         h_flex()
+          .flex_wrap()
           .gap(6)
-          .child(action("show", "launch"))
-          .child(action("match", "sync"))
-          .child(action("restart", "restart"))
-          .child(action("quit", "quit"))
-          .child(action("adopt", "adopt"))
+          .child(action("show browser", "launch",
+            "Bring the browser window forward. The only thing that starts it."))
+          .child(action("redo groups", "sync",
+            "Make the groups match this list: add what is missing, take away what is not wanted."))
+          .child(action("restart browser", "restart",
+            "Close it and start it again. The only way it reads a changed extension."))
+          .child(action("close browser", "quit",
+            "Quit the browser. The tabs come back when you show it again."))
+          .child(action("take over old groups", "adopt",
+            "Once, after moving from the Herdr that runs in a terminal: "
+            + "the groups it still owns are taken over instead of being made again beside them."))
       )
       .child(div().text_color(t.dim).text_size(11).child("A browser group for:"))
       .child(v_flex().gap(1).children(spaces().map(row)));
