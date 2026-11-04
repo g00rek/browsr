@@ -10,11 +10,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+import bridge  # noqa: E402
 import cdp_filter  # noqa: E402
 
 
 def main():
-    if not os.environ.get("HERDR_WORKSPACE_ID"):
+    # Ask the bridge, not the environment: the terminal Herdr hands a pane
+    # HERDR_WORKSPACE_ID, the Herdr desktop app hands it a terminal id
+    # instead, and only the bridge knows both. Checking the variable alone
+    # refused every session started from the app.
+    if not bridge.current_workspace_id():
         print("Browsr MCP must run inside a Herdr pane", file=sys.stderr)
         return 2
     # Nothing is asked of the browser here. This used to exit when Browsr was
