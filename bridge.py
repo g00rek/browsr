@@ -1199,6 +1199,15 @@ def spawn_browser(chromium):
         f"--remote-debugging-port={DEVTOOLS_PORT}",
         "--no-first-run",
         "--no-default-browser-check",
+        # Keep the tabs an agent works in alive while nobody is looking at
+        # them. Browsr's window spends its life behind something else and all
+        # but one of its groups are folded away, which is exactly the state
+        # Chromium throttles: screenshots of those tabs were timing out, one
+        # of them for over two minutes. These three turn off the throttling
+        # that applies to a window nothing is showing.
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
         "--new-window",
         "chrome://newtab/",
         "--enable-logging=stderr",

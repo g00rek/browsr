@@ -326,5 +326,70 @@ class WrapperTests(unittest.TestCase):
                 wrapper.wait(timeout=10)
 
 
+    def test_the_wrapper_starts_without_a_herdr_pane_and_says_so(self):
+        """A pane variable that is briefly unreadable cost the whole session
+        its browser tooling: the wrapper exited, and Claude Code never starts
+        a stdio server again until someone reconnects it by hand. Opening a
+        tab is the only thing that needs the workspace, and it says so
+        itself."""
+        root = os.path.join(os.path.dirname(__file__), "..")
+        with tempfile.TemporaryDirectory() as home:
+            npx = os.path.join(home, "npx")
+            record = os.path.join(home, "args")
+            with open(npx, "w") as handle:
+                handle.write(f'#!/bin/sh\necho "$@" > {record}\nexec sleep 30\n')
+            os.chmod(npx, os.stat(npx).st_mode | stat.S_IEXEC)
+            state = os.path.join(home, ".local", "state", "browsr")
+            # No HERDR_WORKSPACE_ID, no HC_TERMINAL_ID: nothing says which
+            # project this is, and `herdr-app` is not on this PATH either.
+            env = {"PATH": home + ":" + os.environ["PATH"], "HOME": home}
+            wrapper = subprocess.Popen([sys.executable, os.path.join(root, "browsr-chrome-mcp.py")], env=env)
+            try:
+                for _ in range(100):
+                    if os.path.exists(record) and os.path.getsize(record):
+                        break
+                    time.sleep(0.05)
+                self.assertIsNone(wrapper.poll(), "the wrapper exited with no workspace to act on")
+                args = open(record).read()
+                self.assertIn("--browser-url=http://127.0.0.1:", args)
+                # Pinned, not @latest: npm was asked on every start, and a
+                # start that waits on the network races a 30 second timeout.
+                self.assertNotIn("@latest", args)
+                self.assertIn("chrome-devtools-mcp@", args)
+                log = os.path.join(state, "mcp.log")
+                for _ in range(60):
+                    if os.path.exists(log):
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(os.path.exists(log), "the wrapper left no record of its start")
+                written = open(log).read()
+                self.assertIn("workspace:", written)
+                self.assertIn("child ", written)
+            finally:
+                wrapper.send_signal(signal.SIGTERM)
+                wrapper.wait(timeout=10)
+
+    def test_the_pinned_version_is_one_npm_actually_has(self):
+        """A pinned version is only better than `@latest` while it exists.
+        This is the one place the real registry is asked, because every other
+        test here stands in for npx with a shell script."""
+        import importlib.util
+        root = os.path.join(os.path.dirname(__file__), "..")
+        spec = importlib.util.spec_from_file_location(
+            "browsr_mcp", os.path.join(root, "browsr-chrome-mcp.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            answer = subprocess.run(
+                ["npm", "view", f"chrome-devtools-mcp@{module.MCP_VERSION}", "version"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise unittest.SkipTest(f"npm could not be asked: {error}")
+        if answer.returncode != 0:
+            raise unittest.SkipTest(f"npm could not be asked: {answer.stderr.strip()[:120]}")
+        self.assertEqual(answer.stdout.strip(), module.MCP_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()
