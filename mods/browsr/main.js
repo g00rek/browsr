@@ -31,15 +31,45 @@ const SKIP = "browsr.skip";
 // How often to ask the browser how it is doing, while the panel is open.
 const STATUS_EVERY = 4000;
 
+// Whether the panel is on screen, and when that last changed:
+// { open: boolean, changed: <ms> }. The button needs it to answer one
+// question — see `pressedWhileOpen` below.
+const PANEL = "browsr.panel";
+
+// A press beside a popup dismisses it before the click arrives, and the
+// panel's own teardown may land either side of that click. Anything that
+// happened this recently is the same press.
+const SAME_PRESS = 250;
+
 export default class Browsr extends View {
   init(_props, cx) {
     this.status = null;
     this.note = "";
     this.working = null;
     if (!this.isButton()) {
+      setShared(PANEL, { open: true, changed: Date.now() });
       cx.timer.every(STATUS_EVERY, (cx) => this.refresh(cx));
       this.refresh(cx);
     }
+  }
+
+  async close() {
+    if (!this.isButton()) setShared(PANEL, { open: false, changed: Date.now() });
+  }
+
+  /**
+   * Was the panel on screen when this press began?
+   *
+   * The button lives outside the popup, so pressing it dismisses the popup
+   * first and only then delivers the click — which would reopen what the
+   * person just closed, and the panel would never shut. Two things can be
+   * true by the time the click lands: the panel is still there (nothing
+   * dismissed it), or it has only just gone. Both mean the press was a
+   * "close", so neither may reopen it.
+   */
+  pressedWhileOpen() {
+    const panel = shared(PANEL) ?? {};
+    return panel.open === true || Date.now() - (panel.changed ?? 0) < SAME_PRESS;
   }
 
   isButton() {
@@ -124,7 +154,15 @@ export default class Browsr extends View {
       .bg(t.chrome)
       .tooltip("Browsr")
       .hover((s) => s.bg(t.hover))
-      .on_click(() => run("mod.open", { name: "browsr" }))
+      .on_mouse_down("left", () => { this.closing = this.pressedWhileOpen(); })
+      .on_click(() => {
+        const open = (shared(PANEL) ?? {}).open === true;
+        const closing = this.closing;
+        this.closing = false;
+        // Still there: close it. Already gone with this same press: leave it.
+        if (!open && closing) return;
+        run("mod.open", { name: "browsr" });
+      })
       // One glyph, tinted by how the browser is: green when it is up and
       // answering, grey when it is not running, amber when something is
       // wrong. A separate status dot beside it would say the same thing
