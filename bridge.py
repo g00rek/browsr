@@ -1031,10 +1031,14 @@ def watch_health():
     alive only while it is on screen, and the browser has to keep up whether
     or not the person is looking at one.
     """
-    following, checking, held = take_watch_locks()
+    # `held` is never read, and must never be dropped: closing those files
+    # releases the locks. A `del held` here to quiet a linter let a second
+    # watcher start and made `following_now()` report that nothing was
+    # following while this very process was.
+    held = take_watch_locks()
+    following, checking = held[0], held[1]
     if not following and not checking:
         return
-    del held  # named only so the locks live as long as this process does
     state = None
     space = app_focused_space()
     next_health = 0.0
