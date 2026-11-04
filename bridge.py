@@ -314,7 +314,12 @@ def herdr_host():
         return "tui"
     if os.environ.get("HC_TERMINAL_ID") or os.environ.get("HERDR_APP_HOME"):
         return "app"
-    if shutil.which("herdr"):
+    # An installed `herdr` binary used to be enough to answer "terminal
+    # Herdr". It is not: the binary stays on disk long after that Herdr has
+    # been shut down for good, and then every call made outside a pane — the
+    # MCP launcher, a hook run by hand — talks to a Herdr that is not there.
+    # Ask whether it is actually answering.
+    if tui_running():
         return "tui"
     return "app" if app_running() else "tui"
 
@@ -972,6 +977,24 @@ def focus_step(last):
     return space
 
 
+def claim_lock(path):
+    """The open file if this process now holds that lock, else None.
+
+    The handle is the caller's to keep: closing the file releases the lock,
+    which is how a watcher once ended up following without holding anything.
+    """
+    try:
+        handle = path.open("w")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()  # someone else holds it, and this file is ours
+        return None
+    return handle
+
+
 def take_watch_locks(health=None, focus=None):
     """Work out what this watcher is for, and hold the locks that say so.
 
@@ -995,28 +1018,15 @@ def take_watch_locks(health=None, focus=None):
     # is watching". The one thing that reports a silent failure would then
     # fail silently itself.
     health.parent.mkdir(parents=True, exist_ok=True)
-    def claim(path):
-        """The open file if this process now holds the lock, else None."""
-        try:
-            handle = path.open("w")
-        except OSError:
-            return None
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            handle.close()  # someone else holds it, and this file is ours
-            return None
-        return handle
-
     handles = []
     following = False
     if herdr_host() == "app":
-        handle = claim(focus)
+        handle = claim_lock(focus)
         if handle is None:
             return False, False, handles  # already followed; nothing to add
         handles.append(handle)
         following = True
-    handle = claim(health)
+    handle = claim_lock(health)
     if handle is None:
         return following, False, handles
     handles.append(handle)
@@ -1035,8 +1045,7 @@ def watch_health():
     # releases the locks. A `del held` here to quiet a linter let a second
     # watcher start and made `following_now()` report that nothing was
     # following while this very process was.
-    held = take_watch_locks()
-    following, checking = held[0], held[1]
+    following, checking, held = take_watch_locks()
     if not following and not checking:
         return
     state = None
@@ -1044,6 +1053,15 @@ def watch_health():
     next_health = 0.0
     while True:
         now = time.monotonic()
+        if not checking and now >= next_health:
+            # Whoever was reporting on the browser may be gone — a Herdr shut
+            # down for the day. Without this the job stays undone for as long
+            # as this process lives, because the lock was only ever tried once.
+            next_health = now + HEALTH_POLL_SECONDS
+            handle = claim_lock(HEALTH_LOCK)
+            if handle is not None:
+                held.append(handle)
+                checking = True
         if checking and now >= next_health:
             next_health = now + HEALTH_POLL_SECONDS
             try:

@@ -813,6 +813,41 @@ class BridgeTests(unittest.TestCase):
                 patch.dict(os.environ, {"HERDR_SOCKET_PATH": "/run/herdr.sock"}):
             self.assertEqual(bridge.herdr_host(), "app", "the caller's word did not win")
 
+    def test_an_installed_binary_is_not_a_running_terminal_herdr(self):
+        """The terminal Herdr was retired on 2026-11-04 but its binary stays
+        on disk. Outside a pane Browsr has to ask what is answering, not what
+        is installed, or every call made by hand goes to a dead Herdr."""
+        with patch.object(bridge, "HOST_OVERRIDE", None), \
+                patch.dict(os.environ, {}, clear=True), \
+                patch.object(bridge.shutil, "which", lambda name: "/usr/bin/herdr"), \
+                patch.object(bridge, "tui_running", lambda: False), \
+                patch.object(bridge, "app_running", lambda: True):
+            self.assertEqual(bridge.herdr_host(), "app")
+        with patch.object(bridge, "HOST_OVERRIDE", None), \
+                patch.dict(os.environ, {}, clear=True), \
+                patch.object(bridge, "tui_running", lambda: True):
+            self.assertEqual(bridge.herdr_host(), "tui")
+
+    def test_the_health_watch_is_picked_up_when_its_holder_goes(self):
+        """One Herdr shuts down for good and the other's watcher is already
+        running. Nothing would report on the browser again until something
+        restarted it, because the lock was tried once at startup."""
+        with tempfile.TemporaryDirectory() as directory:
+            health = Path(directory) / "health.lock"
+            focus = Path(directory) / "focus-app.lock"
+            other = health.open("w")
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(bridge, "HOST_OVERRIDE", "app"):
+                following, checking, held = bridge.take_watch_locks(health, focus)
+            self.assertEqual((following, checking), (True, False))
+
+            other.close()  # that Herdr is gone
+            later = bridge.claim_lock(health)
+            self.assertIsNotNone(later, "the health watch was never picked up")
+            later.close()
+            for handle in held:
+                handle.close()
+
     def test_the_two_herdrs_never_share_a_namespace(self):
         """One namespace for both would hand each the other's tab groups."""
         with patch.dict(os.environ, {}, clear=True):
