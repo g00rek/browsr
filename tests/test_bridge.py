@@ -176,7 +176,8 @@ class BridgeTests(unittest.TestCase):
             native_host.reconcile_workspaces()
 
         self.assertEqual([message["type"] for message in written], ["workspace_set"])
-        self.assertEqual(written[0]["workspaces"], [{"workspace_id": "w7", "label": "My app"}])
+        self.assertEqual(written[0]["workspaces"],
+                         [{"workspace_id": "w7", "label": "My app", "color": "grey"}])
 
     def test_status_reports_what_the_panel_has_to_show(self):
         with patch.object(bridge, "browser_alive", return_value=True), \

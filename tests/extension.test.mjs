@@ -410,25 +410,23 @@ test('an empty answer never closes a taken-over group', async () => {
 	assert.deepEqual(harness.strip().map(group => group.title), ['retired']);
 });
 
-test("a project's colour reaches its group, and only when Herdr has one", async () => {
-	// Nine names, no hex: the strip can be made to read the same as the list
-	// of projects, but only in Chromium's own words.
+test('every group is the one quiet colour, and nothing else is accepted', async () => {
+	// A colour per project turned the strip into a rainbow and said what the
+	// list of projects already says. Chromium takes nine names and throws on
+	// anything else, so the guard is worth having even with one colour.
 	const harness = await boot({ windows: [1] });
 	await harness.deliver({
 		type: 'workspace_set',
 		session_id: SESSION,
 		workspaces: [
-			{ workspace_id: 'sp1', label: 'api', color: 'cyan' },
-			{ workspace_id: 'sp2', label: 'notes' },
-			{ workspace_id: 'sp3', label: 'docs', color: 'chartreuse' },
+			{ workspace_id: 'sp1', label: 'api', color: 'grey' },
+			{ workspace_id: 'sp2', label: 'notes', color: 'chartreuse' },
 		],
 	});
 	const strip = harness.strip();
-	assert.equal(strip.find(g => g.title === 'api').color, 'cyan');
-	assert.notEqual(strip.find(g => g.title === 'docs').color, 'chartreuse',
+	assert.equal(strip.find(g => g.title === 'api').color, 'grey');
+	assert.notEqual(strip.find(g => g.title === 'notes').color, 'chartreuse',
 		'passed Chromium a colour it does not have');
-	assert.ok(strip.find(g => g.title === 'notes'),
-		'a project nobody painted lost its group');
 });
 
 test('a Herdr that is still running does not lose its groups', async () => {

@@ -730,35 +730,16 @@ def tui_running():
 # `adopt_other_herdr`.
 
 
-# A tab group's colour is one of nine names Chromium allows, and nothing
-# else: no hex, no alpha. Herdr paints a project with one of six, so each
-# one has a name here and the browser strip ends up the same colours as the
-# list of projects. A project Herdr has not painted is left alone rather
-# than painted grey, because Chromium already gave it one.
-GROUP_COLORS = {
-    "ansi1": "pink",
-    "ansi2": "green",
-    "ansi3": "orange",
-    "ansi4": "blue",
-    "ansi5": "purple",
-    "ansi6": "cyan",
-}
-
-
-def space_colors():
-    """What Herdr has painted each project, in Chromium's own words."""
-    painted = app_shared().get("space.colors")
-    if not isinstance(painted, dict):
-        return {}
-    return {
-        space: GROUP_COLORS[name]
-        for space, name in painted.items()
-        if isinstance(name, str) and name in GROUP_COLORS
-    }
+# Every group the same, quiet colour.
+#
+# Chromium allows nine colour names for a tab group. Letting each project
+# keep a different one turned the strip into a rainbow, and the colour was
+# saying something the list of projects already says better. Grey says
+# nothing, which is the point: the names are what you read.
+GROUP_COLOR = "grey"
 
 
 def workspace_set_message(workspaces, session_id=None):
-    painted = space_colors() if herdr_host() == "app" else {}
     return {
         "type": "workspace_set",
         "session_id": session_id or herdr_session_id(),
@@ -766,8 +747,7 @@ def workspace_set_message(workspaces, session_id=None):
             {
                 "workspace_id": workspace["workspace_id"],
                 "label": workspace.get("label") or workspace["workspace_id"],
-                **({"color": painted[workspace["workspace_id"]]}
-                   if workspace["workspace_id"] in painted else {}),
+                "color": GROUP_COLOR,
             }
             for workspace in workspaces
         ],
