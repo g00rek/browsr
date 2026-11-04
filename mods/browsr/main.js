@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { exec, spaces, theme, home, notify, run, props, shared, setShared } from "herdr";
 
@@ -125,7 +125,11 @@ export default class Browsr extends View {
       .tooltip("Browsr")
       .hover((s) => s.bg(t.hover))
       .on_click(() => run("mod.open", { name: "browsr" }))
-      .child(div().size(9).rounded(5).bg(this.colour(t)));
+      // One glyph, tinted by how the browser is: green when it is up and
+      // answering, grey when it is not running, amber when something is
+      // wrong. A separate status dot beside it would say the same thing
+      // twice in a button 38px wide.
+      .child(svg("mods/browsr/browsr.svg").size(16).text_color(this.colour(t)));
   }
 
   render(cx) {
