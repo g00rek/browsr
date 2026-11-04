@@ -160,19 +160,18 @@ export default class Browsr extends View {
         .rounded(5)
         .hover((s) => s.bg(t.hover))
         .on_click((_event, cx) => this.toggle(cx, space.id))
+        // A tick, or the room one would take. A drawn box with a glyph
+        // inside came out as a smudge at this size and took its colour from
+        // whatever showed through the panel; this is how the app marks a
+        // chosen row everywhere else.
         .child(
-          div()
-            .size(14)
-            .rounded(3)
+          h_flex()
+            .size(15)
             .flex_none()
             .items_center()
             .justify_center()
-            .text_size(10)
-            .border_1()
-            .border_color(on ? t.accent : t.border)
-            .bg(on ? t.accent : t.surface)
-            .text_color(t.accent_foreground)
-            .child(on ? "✓" : "")
+            .when(on, (el) =>
+              el.child(svg("mods/browsr/check.svg").size(13).text_color(t.accent)))
         )
         .child(div().flex_1().text_color(on ? t.foreground : t.dim).child(space.name ?? space.id))
         .child(div().text_color(t.dim).text_size(11).child(on ? "" : "no browser"));
