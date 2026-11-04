@@ -838,6 +838,42 @@ class BridgeTests(unittest.TestCase):
                 {"workspace_id": "sp2", "label": "sp2", "focused": True},
             ])
 
+    def test_a_space_turned_off_gets_no_group(self):
+        """Not every project needs a browser, and a group per space is noise
+        when half of them are never opened. The panel writes the choice into
+        the app's own shared state; this is the other end of it."""
+        answer = json.dumps({"spaces": [
+            {"id": "sp1", "name": "api", "active": True, "tabs": []},
+            {"id": "sp2", "name": "notes", "active": False, "tabs": []},
+        ]})
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "shared.json").write_text(json.dumps({"browsr.skip": {"sp2": True}}))
+            with patch.object(bridge, "app_home", lambda: home), \
+                    patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
+                    patch.object(bridge.subprocess, "run",
+                                 lambda *a, **k: subprocess.CompletedProcess(a, 0, answer, "")):
+                self.assertEqual(bridge.skipped_spaces(), {"sp2"})
+                self.assertEqual([s["label"] for s in bridge.app_spaces()], ["api"])
+
+    def test_turning_a_space_back_on_is_remembered_as_off_being_false(self):
+        """The panel removes the key, but an older copy wrote false."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "shared.json").write_text(
+                json.dumps({"browsr.skip": {"sp1": False, "sp2": True}}))
+            with patch.object(bridge, "app_home", lambda: home):
+                self.assertEqual(bridge.skipped_spaces(), {"sp2"})
+
+    def test_shared_state_that_will_not_parse_turns_nothing_off(self):
+        """It is the app's file, written by every panel. A bad read must not
+        silently take the browser away from every project."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "shared.json").write_text("{ not json")
+            with patch.object(bridge, "app_home", lambda: home):
+                self.assertEqual(bridge.skipped_spaces(), set())
+
     def test_an_app_that_will_not_answer_is_not_a_user_with_no_spaces(self):
         """The extension reads an empty list as "say nothing" on purpose."""
         with patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \

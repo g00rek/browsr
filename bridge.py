@@ -283,6 +283,31 @@ def herdr_host():
     return "app" if app_running() else "tui"
 
 
+SKIP_KEY = "browsr.skip"
+
+
+def app_shared():
+    """The app's shared state, where its panels keep what they remember."""
+    try:
+        return json.loads((app_home() / "shared.json").read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def skipped_spaces():
+    """Spaces the person has turned Browsr off for.
+
+    Not every project needs a browser, and a group per space is noise when
+    half of them are never opened. The panel writes the list into the app's
+    own shared state, which is also where its other panels keep what they
+    remember, so there is no second file to lose.
+    """
+    chosen = app_shared().get(SKIP_KEY)
+    if not isinstance(chosen, dict):
+        return set()
+    return {space for space, off in chosen.items() if off}
+
+
 def app_spaces():
     """The app's spaces, in the shape the extension is told about.
 
@@ -302,6 +327,7 @@ def app_spaces():
         return None
     if not spaces:
         return None
+    skip = skipped_spaces()
     return [
         {
             "workspace_id": space["id"],
@@ -309,7 +335,7 @@ def app_spaces():
             "focused": bool(space.get("active")),
         }
         for space in spaces
-        if space.get("id")
+        if space.get("id") and space["id"] not in skip
     ]
 
 
@@ -730,6 +756,24 @@ def start_watcher():
         )
     except OSError as error:
         print(f"Browsr could not start its watcher: {error}", file=sys.stderr)
+
+
+def restart_browser():
+    """Quit the browser and bring it back.
+
+    The one thing that makes Chromium read an edited extension again: it
+    keeps its own compiled copy, and a plain restart runs that copy unless
+    the profile's registration is dropped first, which starting does.
+    """
+    quit_browser()
+    deadline = time.monotonic() + 10
+    while browser_pids() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    return launch()
+
+
+def print_quit():
+    print("Browsr closed." if quit_browser() else "Browsr was not running anyway.")
 
 
 def launch():
@@ -1265,11 +1309,13 @@ def main():
         open_tab(sys.argv[2])
         return
     if len(sys.argv) != 2 or sys.argv[1] not in {
-        "setup", "launch", "sync", "adopt", "status", "panel", "cleanup",
-        "watch", "hook", "open-link", "workspace-tabs", "mcp-endpoint",
+        "setup", "launch", "restart", "quit", "sync", "adopt", "status",
+        "panel", "cleanup", "watch", "hook", "open-link", "workspace-tabs",
+        "mcp-endpoint",
     }:
         raise RuntimeError(
-            "Usage: bridge.py setup|launch|sync|adopt|status|panel|cleanup|watch"
+            "Usage: bridge.py setup|launch|restart|quit|sync|adopt|status"
+            "|panel|cleanup|watch"
             "|hook|open-link|open-url URL|open-tab URL|workspace-tabs|mcp-endpoint"
         )
     {
@@ -1281,6 +1327,8 @@ def main():
         "cleanup": print_cleanup,
         "watch": watch_health,
         "launch": launch,
+        "restart": restart_browser,
+        "quit": print_quit,
         "hook": hook,
         "open-link": open_link,
         "workspace-tabs": workspace_tabs,
