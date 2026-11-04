@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { exec, spaces, focused, theme, home, notify, run, props, shared, setShared } from "herdr";
+import { exec, spaces, focused, theme, home, notify, run, props, shared, setShared, closeOverlay } from "herdr";
 
 // Browsr keeps one browser tab group per space, named after it, and brings
 // that group forward when you switch spaces.
@@ -245,6 +245,13 @@ export default class Browsr extends View {
       .id("root")
       .size_full()
       .bg(t.popover)
+      // A press anywhere else puts the panel away, which is what a panel
+      // that drops out of a button should do. Said here rather than left to
+      // the window, so that it is the same however the panel was opened.
+      .on_mouse_down_out(() => {
+        const overlay = props()?.overlay;
+        if (overlay) closeOverlay(overlay);
+      })
       .p(12)
       .gap(10)
       .text_size(13)
