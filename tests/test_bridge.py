@@ -1,5 +1,6 @@
 import contextlib
 import importlib.util
+import fcntl
 import json
 import os
 import socket
@@ -917,6 +918,63 @@ class BridgeTests(unittest.TestCase):
 
             self.assertEqual(len(synced), 1, "one switch, one sync")
             self.assertEqual(space, "sp2")
+
+    def test_each_herdr_gets_its_own_follower(self):
+        """One browser, so one health watch; two Herdrs, so two followers.
+        They shared a lock, and the Herdr that started second was followed by
+        nobody: switching spaces in the desktop app moved no tabs at all."""
+        with patch.object(bridge, "HOST_OVERRIDE", "app"):
+            under_app = bridge.focus_lock_path()
+        with patch.object(bridge, "HOST_OVERRIDE", "tui"):
+            under_tui = bridge.focus_lock_path()
+        self.assertNotEqual(under_app, under_tui)
+
+    def test_the_other_herdrs_health_watch_does_not_stop_the_following(self):
+        """The regression itself: the terminal Herdr's watcher holds the
+        health lock for days. A watcher started under the app must still
+        follow the app's spaces, and simply leave the reporting to it."""
+        with tempfile.TemporaryDirectory() as directory:
+            health = Path(directory) / "health.lock"
+            focus = Path(directory) / "focus-app.lock"
+            taken = health.open("w")
+            fcntl.flock(taken, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with patch.object(bridge, "HOST_OVERRIDE", "app"):
+                    following, checking, held = bridge.take_watch_locks(health, focus)
+                self.assertTrue(following, "gave up the following over the health lock")
+                self.assertFalse(checking, "two watchers reporting on one browser")
+                for handle in held:
+                    handle.close()
+            finally:
+                taken.close()
+
+    def test_a_second_watcher_for_the_same_herdr_does_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            health = Path(directory) / "health.lock"
+            focus = Path(directory) / "focus-app.lock"
+            with patch.object(bridge, "HOST_OVERRIDE", "app"):
+                first = bridge.take_watch_locks(health, focus)
+                self.assertEqual(first[:2], (True, True))
+                second = bridge.take_watch_locks(health, focus)
+            self.assertEqual(second[:2], (False, False))
+            for handle in first[2]:
+                handle.close()
+
+    def test_the_panel_is_told_when_nothing_is_following(self):
+        """The browser outlives any one Herdr, so it can be up and answering
+        while the part that follows the spaces is gone. That looks like
+        nothing at all to someone switching spaces."""
+        with tempfile.TemporaryDirectory() as directory:
+            focus = Path(directory) / "focus-app.lock"
+            with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                    patch.object(bridge, "focus_lock_path", lambda: focus):
+                self.assertFalse(bridge.following_now())
+                handle = focus.open("w")
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    self.assertTrue(bridge.following_now())
+                finally:
+                    handle.close()
 
     def test_a_missing_view_file_is_not_a_switch(self):
         with tempfile.TemporaryDirectory() as directory:

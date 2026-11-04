@@ -129,6 +129,10 @@ export default class Browsr extends View {
     if (!this.status) return "asking…";
     if (!this.status.browser) return "not running";
     if (!this.status.bridge) return "running, but its extension is not answering";
+    // The browser outlives any one Herdr, and the part that follows your
+    // spaces is a separate program. It can be gone while everything else
+    // looks fine, and then nothing moves when you switch.
+    if (this.status.following === false) return "running, but nothing is following your spaces";
     const strip = this.status.strip ?? {};
     if (strip.windows && strip.windows !== 1) return `${strip.windows} windows — there should be one`;
     const groups = (strip.groups ?? []).length;

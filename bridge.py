@@ -52,6 +52,42 @@ HEALTH_POLL_SECONDS = 10
 # does on its own schedule, is not reported as a fault.
 HEALTH_GRACE_SECONDS = 60
 HEALTH_LOCK = STATE_DIR / "health.lock"
+
+
+def focus_lock_path():
+    """One follower per Herdr, not one per machine.
+
+    The health watch is about the browser, of which there is one, so a single
+    watcher does it for everybody. Following the space in front is about a
+    Herdr, and this machine runs two of them. They shared `health.lock`, so
+    whichever started first took the watch and the other Herdr's spaces were
+    followed by nobody — which is exactly what happened: the terminal Herdr's
+    watcher held it from a Monday, and switching spaces in the app moved no
+    tabs at all.
+    """
+    return STATE_DIR / f"focus-{herdr_host()}.lock"
+
+
+def following_now():
+    """Is something already following this Herdr's spaces?
+
+    Read by taking the follower's lock and giving it straight back: if it can
+    be taken, no watcher holds it. Cheap, and it cannot disagree with the
+    watcher the way a process scan can.
+    """
+    if herdr_host() != "app":
+        return True  # the terminal Herdr calls the plugin itself
+    try:
+        focus_lock_path().parent.mkdir(parents=True, exist_ok=True)
+        handle = focus_lock_path().open("w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+    return False
 _HERDR_SOCKET_CACHE = None
 HOST_NAME = "dev.herdr.browser"
 EXTENSION_ID = "lnknfooimknfekkpecbjnkjcjhdjmekj"
@@ -758,6 +794,18 @@ def start_watcher():
         print(f"Browsr could not start its watcher: {error}", file=sys.stderr)
 
 
+def sync_and_follow():
+    """The `sync` command: match the strip, and make sure a follower exists.
+
+    Under the app nothing starts the watcher but Browsr itself, and the
+    browser outlives any one Herdr. Someone pressing "redo groups" because
+    the tabs stopped following should not also have to know that a separate
+    process does the following.
+    """
+    sync_workspaces()
+    start_watcher()
+
+
 def restart_browser():
     """Quit the browser and bring it back.
 
@@ -924,6 +972,57 @@ def focus_step(last):
     return space
 
 
+def take_watch_locks(health=None, focus=None):
+    """Work out what this watcher is for, and hold the locks that say so.
+
+    Two jobs, two scopes. Reporting on the browser is one per machine,
+    because there is one browser. Following the space in front is one per
+    Herdr, because this machine runs two of them.
+
+    They used to share a single lock, so the second Herdr to start got
+    nothing: its spaces were followed by no one, and switching moved no tabs.
+    Losing the health lock now only means somebody else is already reporting
+    on the browser — the following carries on regardless.
+
+    Returns `(following, checking, handles)`. The handles are the caller's to
+    keep: closing a file drops its lock.
+    """
+    health = health or HEALTH_LOCK
+    focus = focus or focus_lock_path()
+    # Without the mkdir this raises FileNotFoundError when the state directory
+    # is not there yet — the startup hook running before the build step, or
+    # after a cleanup — and the bare OSError below reads that as "someone else
+    # is watching". The one thing that reports a silent failure would then
+    # fail silently itself.
+    health.parent.mkdir(parents=True, exist_ok=True)
+    def claim(path):
+        """The open file if this process now holds the lock, else None."""
+        try:
+            handle = path.open("w")
+        except OSError:
+            return None
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()  # someone else holds it, and this file is ours
+            return None
+        return handle
+
+    handles = []
+    following = False
+    if herdr_host() == "app":
+        handle = claim(focus)
+        if handle is None:
+            return False, False, handles  # already followed; nothing to add
+        handles.append(handle)
+        following = True
+    handle = claim(health)
+    if handle is None:
+        return following, False, handles
+    handles.append(handle)
+    return following, True, handles
+
+
 def watch_health():
     """Run by Herdr at startup; one per machine, not one per session.
 
@@ -932,24 +1031,16 @@ def watch_health():
     alive only while it is on screen, and the browser has to keep up whether
     or not the person is looking at one.
     """
-    try:
-        # Without the mkdir this raises FileNotFoundError when the state
-        # directory is not there yet — the startup hook running before the
-        # build step, or after a cleanup — and the bare OSError below read
-        # that as "someone else is watching". The one thing that reports a
-        # silent failure then failed silently itself.
-        HEALTH_LOCK.parent.mkdir(parents=True, exist_ok=True)
-        handle = HEALTH_LOCK.open("w")
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return  # another Herdr session is already watching
+    following, checking, held = take_watch_locks()
+    if not following and not checking:
+        return
+    del held  # named only so the locks live as long as this process does
     state = None
     space = app_focused_space()
-    following = herdr_host() == "app"
     next_health = 0.0
     while True:
         now = time.monotonic()
-        if now >= next_health:
+        if checking and now >= next_health:
             next_health = now + HEALTH_POLL_SECONDS
             try:
                 state = health_step(state, now)
@@ -1035,6 +1126,7 @@ def browser_status():
     return {
         "browser": browser_alive(),
         "bridge": link,
+        "following": following_now(),
         "extension_stale": extension_is_stale(),
         "workspaces": [
             workspace.get("label") or workspace["workspace_id"]
@@ -1320,7 +1412,7 @@ def main():
         )
     {
         "setup": setup,
-        "sync": sync_workspaces,
+        "sync": sync_and_follow,
         "adopt": adopt_other_herdr,
         "status": print_status,
         "panel": toggle_panel,
