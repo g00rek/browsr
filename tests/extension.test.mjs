@@ -348,6 +348,68 @@ test('groups of a Herdr that is gone are taken over, not duplicated', async () =
 		'made a new group instead of taking over the one that was there');
 });
 
+test('a taken-over group with no project here is closed, not left behind', async () => {
+	// The leftovers of a retired Herdr: projects that only ever existed there.
+	// Dropping ownership alone left them on the strip for good — nothing owned
+	// them any more, so nothing ever pruned them, and the number of groups
+	// could not be made to agree with the list of projects again.
+	const harness = await boot({
+		windows: [1],
+		tabs: [
+			{ id: 80, windowId: 1, groupId: 800 },
+			{ id: 81, windowId: 1, groupId: 801 },
+		],
+		groups: [
+			{ id: 800, windowId: 1, title: 'api' },
+			{ id: 801, windowId: 1, title: 'retired' },
+		],
+		storage: {
+			herdrBrowserState: {
+				windowId: 1,
+				groups: {
+					[`${OTHER_HERDR}\u001fw16`]: 800,
+					[`${OTHER_HERDR}\u001fw17`]: 801,
+				},
+				lastActiveTabs: {},
+			},
+		},
+	});
+
+	await harness.deliver({
+		...workspaceSet(SESSION, ['sp1', 'api']),
+		adopt_sessions: [OTHER_HERDR],
+	});
+
+	assert.deepEqual(harness.strip().map(group => group.title), ['api'],
+		'the retired Herdr\'s own project was left on the strip');
+});
+
+test('an empty answer never closes a taken-over group', async () => {
+	// The same guard the prune has: no workspaces means Herdr failed to
+	// answer, not that it has none, and acting on it would wipe the strip.
+	const harness = await boot({
+		windows: [1],
+		tabs: [{ id: 80, windowId: 1, groupId: 800 }],
+		groups: [{ id: 800, windowId: 1, title: 'retired' }],
+		storage: {
+			herdrBrowserState: {
+				windowId: 1,
+				groups: { [`${OTHER_HERDR}\u001fw17`]: 800 },
+				lastActiveTabs: {},
+			},
+		},
+	});
+
+	await harness.deliver({
+		type: 'workspace_set',
+		session_id: SESSION,
+		workspaces: [],
+		adopt_sessions: [OTHER_HERDR],
+	});
+
+	assert.deepEqual(harness.strip().map(group => group.title), ['retired']);
+});
+
 test('a Herdr that is still running does not lose its groups', async () => {
 	// Two Herdrs side by side is a supported setup: the bridge names a session
 	// only when it is not answering, and nothing else may be taken.

@@ -209,10 +209,12 @@ async function syncWorkspaceSet(message) {
 	// the old one is still owned, so the title lookup below will not take it.
 	// Only the ownership is dropped, never a tab — the lookup then adopts the
 	// group it finds, which is the same path a group made by hand goes through.
+	const released = new Set();
 	for (const session of message.adopt_sessions || []) {
 		const stale = `${session}\u001f`;
-		for (const key of [...groups.keys()]) {
+		for (const [key, groupId] of [...groups.entries()]) {
 			if (!key.startsWith(stale)) continue;
+			released.add(groupId);
 			groups.delete(key);
 			lastActiveTabs.delete(key);
 		}
@@ -233,6 +235,18 @@ async function syncWorkspaceSet(message) {
 		for (const key of [...groups.keys()]) {
 			if (!key.startsWith(prefix) || wanted.has(key)) continue;
 			await closeWorkspaceGroup(key);
+		}
+		// What the other Herdr owned and this one has no name for. The loop
+		// above adopts every released group whose title matches a project
+		// here; the rest belonged to projects that only ever existed in the
+		// Herdr being left behind. Without this they stay on the strip for
+		// good: nothing owns them any more, so nothing ever prunes them, and
+		// the count never agrees with the list of projects again.
+		const claimed = new Set(groups.values());
+		for (const groupId of released) {
+			if (claimed.has(groupId)) continue;
+			const tabs = await chrome.tabs.query({ groupId });
+			if (tabs.length) await chrome.tabs.remove(tabs.map(tab => tab.id));
 		}
 	}
 	await saveState();
