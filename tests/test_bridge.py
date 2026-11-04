@@ -1011,18 +1011,93 @@ class BridgeTests(unittest.TestCase):
                 finally:
                     handle.close()
 
+    def test_the_question_waits_for_an_answer_and_a_yes_lets_the_page_through(self):
+        """Refusing outright was right but unhelpful: the agent stops, and the
+        one person who can change it has to be told, in another window, what
+        to press. The question goes on screen instead."""
+        with tempfile.TemporaryDirectory() as directory:
+            ask = Path(directory) / "ask.json"
+            answer = Path(directory) / "answer.json"
+
+            def say_yes():
+                for _ in range(200):
+                    if ask.exists():
+                        asked = json.loads(ask.read_text())
+                        answer.write_text(json.dumps({"id": asked["id"], "yes": True}))
+                        return
+                    time.sleep(0.02)
+
+            with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                    patch.object(bridge, "STATE_DIR", Path(directory)), \
+                    patch.object(bridge, "ASK_FILE", ask), \
+                    patch.object(bridge, "ANSWER_FILE", answer), \
+                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "space_name", lambda _id: "brain"):
+                threading.Thread(target=say_yes, daemon=True).start()
+                bridge.ask_to_switch_on("sp9", "http://localhost:3000")
+
+            asked = json.loads(ask.read_text())
+            self.assertEqual(asked["space"], "sp9")
+            self.assertEqual(asked["name"], "brain", "asked about a project by its id")
+            self.assertEqual(asked["url"], "http://localhost:3000")
+
+    def test_a_no_on_screen_is_a_refusal_with_the_answer_in_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ask = Path(directory) / "ask.json"
+            answer = Path(directory) / "answer.json"
+
+            def say_no():
+                for _ in range(200):
+                    if ask.exists():
+                        asked = json.loads(ask.read_text())
+                        answer.write_text(json.dumps({"id": asked["id"], "yes": False}))
+                        return
+                    time.sleep(0.02)
+
+            with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                    patch.object(bridge, "STATE_DIR", Path(directory)), \
+                    patch.object(bridge, "ASK_FILE", ask), \
+                    patch.object(bridge, "ANSWER_FILE", answer), \
+                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "space_name", lambda _id: "brain"):
+                threading.Thread(target=say_no, daemon=True).start()
+                with self.assertRaises(RuntimeError) as refused:
+                    bridge.ask_to_switch_on("sp9", "http://localhost:3000")
+            self.assertIn("the answer on screen was no", str(refused.exception))
+
+    def test_nobody_at_the_screen_is_not_a_hang(self):
+        """An agent asking while nobody is there gets on with its life, with a
+        sentence that says what to do."""
+        with tempfile.TemporaryDirectory() as directory:
+            ask = Path(directory) / "ask.json"
+            with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                    patch.object(bridge, "STATE_DIR", Path(directory)), \
+                    patch.object(bridge, "ASK_FILE", ask), \
+                    patch.object(bridge, "ANSWER_FILE", Path(directory) / "answer.json"), \
+                    patch.object(bridge, "ASK_SECONDS", 0.4), \
+                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "space_name", lambda _id: "brain"):
+                with self.assertRaises(RuntimeError) as refused:
+                    bridge.ask_to_switch_on("sp9", None)
+            self.assertIn("Nobody answered", str(refused.exception))
+            self.assertFalse(ask.exists(), "left a question nobody is waiting on")
+
     def test_a_page_is_not_opened_into_a_project_that_is_switched_off(self):
-        """A project switched off is left out of the list the extension is
-        given, and whatever is missing from that list is pruned. Opening a
-        page in one made a group that the next project switch took away, with
-        an agent working in those tabs: it lost them twice in five minutes and
-        nothing said why."""
-        with patch.object(bridge, "HOST_OVERRIDE", "app"), \
-                patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
-                patch.object(bridge, "ensure_browser",
-                             lambda **kw: self.fail("started the browser for a project that is off")):
-            with self.assertRaises(RuntimeError) as refused:
-                bridge.ask_extension("open_url", "sp9", "nope", url="http://localhost:3000")
+        """Opening a page in a project that is off made a group the next
+        project switch took away, with an agent working in those tabs. It
+        asks first, and with no answer it never gets as far as the browser."""
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(bridge, "HOST_OVERRIDE", "app"), \
+                    patch.object(bridge, "STATE_DIR", Path(directory)), \
+                    patch.object(bridge, "ASK_FILE", Path(directory) / "ask.json"), \
+                    patch.object(bridge, "ANSWER_FILE", Path(directory) / "answer.json"), \
+                    patch.object(bridge, "ASK_SECONDS", 0.3), \
+                    patch.object(bridge, "space_name", lambda _id: "brain"), \
+                    patch.object(bridge, "skipped_spaces", lambda: {"sp9"}), \
+                    patch.object(bridge, "ensure_browser",
+                                 lambda **kw: self.fail("started the browser for a project that is off")):
+                with self.assertRaises(RuntimeError) as refused:
+                    bridge.ask_extension("open_url", "sp9", "nope", url="http://localhost:3000")
             self.assertIn("switched off", str(refused.exception))
             self.assertIn("alt-b", str(refused.exception), "said no without saying where the switch is")
 

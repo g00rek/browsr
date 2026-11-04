@@ -1321,26 +1321,85 @@ def is_local_url(raw):
         return False
 
 
-def refuse_if_switched_off(workspace_id):
-    """Stop before making a group the next sync would take straight back.
+ASK_FILE = STATE_DIR / "ask.json"
+ANSWER_FILE = STATE_DIR / "answer.json"
+# Long enough for someone at the screen to read a question and press a button,
+# short enough that an agent asking while nobody is there gets on with its
+# life. It fails with a sentence saying what to do, so the time is not lost.
+ASK_SECONDS = 20
+SWITCHED_OFF = (
+    "Browsr is switched off for this project; its tabs would be taken away "
+    "again at the next switch. Turn it on in the Browsr panel (alt-b) or in "
+    "the project list, then try again"
+)
 
-    A project switched off in the panel is left out of the list the extension
-    is given, and anything missing from that list is pruned. Opening a page in
-    such a project therefore made a group that lived until the next time
-    anyone switched projects — and an agent working in those tabs lost them
-    mid-sentence, twice in five minutes, with no sign of why.
 
-    Refusing says the one thing that is actually true, and the person reading
-    it has the switch.
+def space_name(workspace_id):
+    """A project's name, skipped or not, for a question about it."""
+    herdr_app = app_cli()
+    if not herdr_app:
+        return workspace_id
+    try:
+        output = subprocess.run(
+            [herdr_app, "ls"], capture_output=True, text=True, timeout=8, check=True,
+        )
+        for space in json.loads(output.stdout).get("spaces") or []:
+            if space.get("id") == workspace_id:
+                return space.get("name") or workspace_id
+    except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError):
+        pass
+    return workspace_id
+
+
+def ask_to_switch_on(workspace_id, url):
+    """Ask before refusing, when there is someone to ask.
+
+    A project switched off is left out of the list the extension is given,
+    and anything missing from that list is pruned — so a page opened in one
+    makes a group that lives until the next project switch, and an agent
+    working in those tabs loses them mid-sentence.
+
+    Refusing outright was right but unhelpful: the agent stops, and the one
+    person who can change it has to be told by the agent, in a different
+    window, what to press. So the question goes on screen instead. The panel
+    watches for it, asks, and writes the answer back here.
     """
     if herdr_host() != "app" or not workspace_id:
         return
-    if workspace_id in skipped_spaces():
+    if workspace_id not in skipped_spaces():
+        return
+    request = {
+        "id": uuid.uuid4().hex,
+        "space": workspace_id,
+        "name": space_name(workspace_id),
+        "url": url,
+        "at": time.time(),
+    }
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ANSWER_FILE.unlink(missing_ok=True)
+        ASK_FILE.write_text(json.dumps(request), encoding="utf-8")
+    except OSError:
+        raise RuntimeError(SWITCHED_OFF)
+    deadline = time.monotonic() + ASK_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        try:
+            answer = json.loads(ANSWER_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if answer.get("id") != request["id"]:
+            continue
+        if answer.get("yes"):
+            return  # the switch is on; the group may be made
         raise RuntimeError(
-            "Browsr is switched off for this project; its tabs would be taken "
-            "away again at the next switch. Turn it on in the Browsr panel "
-            "(alt-b) or in the project list, then try again"
+            "Browsr stays switched off for this project: the answer on screen was no"
         )
+    try:
+        ASK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    raise RuntimeError(f"{SWITCHED_OFF}. Nobody answered the question on screen")
 
 
 def ask_extension(kind, workspace_id, failure, **extra):
@@ -1357,7 +1416,7 @@ def ask_extension(kind, workspace_id, failure, **extra):
             "from a terminal the Herdr app started"
         )
     if kind in ("open_url", "open_tab"):
-        refuse_if_switched_off(workspace_id)
+        ask_to_switch_on(workspace_id, extra.get("url"))
     ensure_browser(show=False)
     response = socket_request({
         "type": kind,
