@@ -864,7 +864,12 @@ class BridgeTests(unittest.TestCase):
             {"id": "sp1", "name": "api", "active": False, "tabs": []},
             {"id": "sp2", "name": None, "active": True, "tabs": []},
         ]})
-        with patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
+        # An app home of its own, or this reads the real one: the list of
+        # projects that have a browser lives there, and a machine where it
+        # names other projects turns this into an empty answer.
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(bridge, "app_home", lambda: Path(directory)), \
+                patch.object(bridge, "app_cli", lambda: "/usr/bin/herdr-app"), \
                 patch.object(bridge.subprocess, "run",
                              lambda *a, **k: subprocess.CompletedProcess(a, 0, answer, "")):
             self.assertEqual(bridge.app_spaces(), [
